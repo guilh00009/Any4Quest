@@ -1,0 +1,61 @@
+Desktop stereo and initial-gameplay test -- 2026-10-05
+
+RESULT: Distinct left/right eye desktop rendering verified in the Main Menu and
+character-creation screens. Character choices completed and New Game began loading.
+Before an initial gameplay scene appeared, the GPU command processor asserted:
+memory.cpp:102 ClampRangeSize: Attempted to access invalid address 0x600.
+Exit code -2147483645 (0x80000003). Initial gameplay remains BLOCKED/unverified.
+No assertion was disabled or invalid resource replaced to bypass this failure.
+
+Scene test: desktop-test-20261005-020139, bounded to 150s, exited around 140s.
+Full local logs and inputs.txt are preserved there. Newly logged scene pipeline
+0x1b86e8a05269ab57: VS 0xc5c13d3c7614a1b7, FS 0xbe588d5ae93aadab.
+These preceding log entries identify investigation context, not a proven culprit.
+One Critical assertion; no initial-scene or gameplay-input success claimed.
+
+Exact synthetic input timeline (seconds; every button held 0.25s):
+30 yaw30/pitch0, 40 Cross -> Choose Gender;
+50 yaw15/pitch0, 60 Cross -> Select Skin Tone;
+70 yaw0/pitch8, 80 Cross -> chosen tone/confirmation tile;
+90 yaw0/pitch-8, 100 Cross -> loading screen;
+125 yaw10/pitch0 during loading. Position=(0,0,0), roll=0 throughout.
+No physical headset/Move input, microphone permission, account, or network action.
+All choices used only the isolated portable user directory; original saves untouched.
+
+Enable stereo explicitly: SHADPS4_EXPERIMENTAL_WIDE_NEAR_PREVIEW=stereo.
+Enable retained mono: SHADPS4_EXPERIMENTAL_WIDE_NEAR_PREVIEW=1.
+Unset/other values keep the pre-existing disabled behavior.
+Both modes bypass headset exporters and make no guest label writes.
+Launchers: Play The Inpatient - Stereo Desktop Preview.bat / Desktop Preview.bat.
+Neither launcher enables synthetic input or changes headset=0.
+
+Implementation: preserve independent right-eye wide/near atlas UVs and full-view UV;
+pass those through HmdFrame and Presenter; push per-region composition settings
+inside a single rendering pass. Merely drawing two copies of left eye is avoided.
+Guest caller at eboot+0x37303..0x37363 writes full-view maps at overlay+0x18/+0x28;
+the observed game writes equal full-view maps but distinct atlas maps. No flag bit
+semantics were invented: the existing observed shared-atlas/flags-value-5 gate stays.
+
+Validation:
+- Release x64 OpenXR build succeeded (build-stereo-preview.log).
+- Existing mono math: 8 checks / 10368 samples pass.
+- New stereo regression: 6 checks / 20736 per-eye samples pass.
+- Negative control replacing right map with left fails check 2, as required.
+- Actual desktop capture has visible parallax. In an interior rectangle excluding
+  HUD notification/mask, 173737/180000 corresponding eye pixels differ; mean RGB
+  absolute difference 10.1834. Pixel inequality alone is not a full stereo-quality test.
+- Screenshot CUSA08291_20261005_020223_837_hud_000013.png shows distinct eye views;
+  CUSA08291_20261005_020332_832_hud_000036.png shows the loading screen.
+
+Limits: approximate linear radial blend, observed single shared-atlas layout only.
+Visible overlays remain OMITTED, not supported. No headset FOV/IPD/pose/timing,
+latency, synchronization, or real Quest2/3/3S two-Move verification performed.
+Hardware testing is a separate future prerequisite; scene assertion investigation
+can continue locally without a headset. Desktop gaze currently requires test input.
+
+Tested executable SHA256:
+814BB69D5261F027B6D48B603B0CEA943426B5F65A25C3E2E411E6A05DC652BA
+Prior mono binary retained at task-2/shadps4-mono-preview-verified.exe.
+Current user baseline is main 2de834fabe72a0cca5f8542a1c55dc7028763a05.
+This increment modifies 8 source files and adds tools/tests/wide_near_stereo_test.cpp.
+No staging, commit, push, release, install, or game-file upload performed.

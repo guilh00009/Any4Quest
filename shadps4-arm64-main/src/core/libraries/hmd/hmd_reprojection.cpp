@@ -332,11 +332,12 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNear() {
 
 s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
     const OrbisHmdReprojectionTrackerState* tracker, s64 flip_arg, const void* overlay, void* option) {
-    static const bool enabled = [] {
+    static const unsigned mode = [] {
         const char* value = std::getenv("SHADPS4_EXPERIMENTAL_WIDE_NEAR_PREVIEW");
-        return value && std::strcmp(value, "1") == 0;
+        if (value && std::strcmp(value, "stereo") == 0) return 2u;
+        return value && std::strcmp(value, "1") == 0 ? 1u : 0u;
     }();
-    if (!enabled) {
+    if (mode == 0) {
         LOG_ERROR(Lib_Hmd, "(STUBBED) called; experimental desktop preview disabled");
         return ORBIS_OK;
     }
@@ -356,11 +357,20 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
     Libraries::VideoOut::HmdFrame frame{};
     std::memcpy(&frame.eye_textures[0], reinterpret_cast<const void*>(p.texture[0][0]), sizeof(AmdGpu::Image));
     frame.eye_textures[1] = frame.eye_textures[0];
-    frame.is_2d = true; // Mono left-eye desktop preview; never export as a headset frame.
+    frame.is_2d = true; // Both preview modes remain desktop-only; never export to a headset.
     std::memcpy(frame.screen_uv.data(), &p.uv[0][0], 16);
     std::memcpy(frame.preview_near_uv.data(), &p.uv[0][1], 16);
     std::memcpy(frame.preview_view_uv.data(), static_cast<const u8*>(overlay)+0x18, 16);
-    frame.preview_band = {p.transition_start,p.transition_end,1,0};
+    frame.preview_band = {p.transition_start,p.transition_end,1,mode == 2 ? 1.0f : 0.0f};
+    // Observed caller writes right-eye full-view UV at overlay+0x28, left at +0x18.
+    // Both happen to match in this title; preserve them independently.
+    std::memcpy(frame.preview_right_uv[0].data(), &p.uv[1][0], 16);
+    std::memcpy(frame.preview_right_uv[1].data(), &p.uv[1][1], 16);
+    std::memcpy(frame.preview_right_uv[2].data(), static_cast<const u8*>(overlay)+0x28, 16);
+    if (mode == 2 && (!Preview::ValidMap(frame.preview_right_uv[0]) ||
+                     !Preview::ValidMap(frame.preview_right_uv[1]) ||
+                     !Preview::ValidMap(frame.preview_right_uv[2])))
+        return ORBIS_HMD_ERROR_UNSUPPORTED_FEATURE;
     if (!Preview::ValidMap(frame.screen_uv) || !Preview::ValidMap(frame.preview_near_uv) ||
         !Preview::ValidMap(frame.preview_view_uv) || frame.eye_textures[0].width+1 != 1920 ||
         frame.eye_textures[0].height+1 != 1080)
@@ -376,7 +386,7 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
     }
     static bool logged{};
     if (!logged) {
-        LOG_WARNING(Lib_Hmd, "Experimental WideNear desktop preview: left eye, linear radial blend; overlays omitted; no guest label writes");
+        LOG_WARNING(Lib_Hmd, "Experimental WideNear desktop preview: {} eye view(s), linear radial blend; overlays omitted; no guest label writes", mode);
         logged = true;
     }
     return Libraries::VideoOut::SubmitHmdFrame(handle, frame);

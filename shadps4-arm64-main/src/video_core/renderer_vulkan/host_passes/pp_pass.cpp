@@ -239,8 +239,7 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, std::span<const Region
     };
 
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *pipeline);
-    cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(Settings),
-                         &settings);
+
 
     // Without push descriptors the sets have to be written before rendering begins.
     boost::container::static_vector<vk::DescriptorSet, 4> desc_sets;
@@ -269,6 +268,9 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, std::span<const Region
     cmdbuf.beginRendering(rendering_info);
     for (size_t i = 0; i < regions.size(); ++i) {
         const Region& region = regions[i];
+        const Settings& region_settings = region.settings ? *region.settings : settings;
+        cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0,
+                             sizeof(Settings), &region_settings);
         cmdbuf.setViewport(0, vk::Viewport{
                                   .x = static_cast<float>(region.area.offset.x),
                                   .y = static_cast<float>(region.area.offset.y),

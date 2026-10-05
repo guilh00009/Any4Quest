@@ -39,6 +39,7 @@ public:
     struct Region {
         vk::ImageView input;
         vk::Rect2D area;
+        std::optional<Settings> settings; ///< Per-eye override; absent preserves shared settings.
     };
 
     // Frame marker: a row of black and white blocks stamped along the top-left edge of a frame.

@@ -5,6 +5,10 @@
 #include <cmath>
 
 namespace Libraries::Hmd::Preview {
+using EyeMaps = std::array<std::array<float, 4>, 3>; // wide, near, full-view
+inline EyeMaps SelectEyeMaps(unsigned eye, const EyeMaps& left, const EyeMaps& right) {
+    return eye == 0 ? left : right;
+}
 // Experimental desktop model: linear interpolation over a tangent-space annulus.
 // The circular region is supported by public GDC material; the linear curve is
 // an explicit approximation, not a recovered Sony compositor implementation.

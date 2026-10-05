@@ -333,8 +333,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+    const auto& fetch_shader = pipeline->GetFetchShader();
+    const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
     PrepareRenderState(pipeline);
-    if (!BindResources(pipeline)) {
+    if (!BindResources(pipeline, ConditionalBuffers::InstanceRange{
+                                     instance_offset, regs.num_instances.NumInstances()})) {
         if (trace) {
             LOG_INFO(Render_Vulkan, "TRACE   draw dropped: resources could not be bound");
         }
@@ -352,10 +356,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     scheduler.BeginRendering(state);
     scheduler.NoteDraw();
     FrameStats::Draw();
-
-    const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
-    const auto& fetch_shader = pipeline->GetFetchShader();
-    const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
     const auto cmdbuf = scheduler.CommandBuffer();
     scheduler.BindGraphicsPipeline(pipeline->Handle());
@@ -552,7 +552,8 @@ void Rasterizer::OnSubmit() {
     buffer_cache.RunGarbageCollector();
 }
 
-bool Rasterizer::BindResources(const Pipeline* pipeline) {
+bool Rasterizer::BindResources(const Pipeline* pipeline,
+                               std::optional<ConditionalBuffers::InstanceRange> direct_instances) {
     if (IsComputeImageCopy(pipeline)) {
         if (g_draw_trace_budget.load(std::memory_order_relaxed) > 0) {
             LOG_INFO(Render_Vulkan, "TRACE   compute handled as image copy");
@@ -580,10 +581,30 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     conditional_selector_snapshot = nullptr;
     conditional_material = 4;
+    conditional_instance_mask = 0xf;
     if (!pipeline->IsCompute()) {
         const auto* vs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Vertex)];
         const auto* fs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Fragment)];
         const auto& input = liverpool->regs.ps_inputs[3];
+        const auto& instance_input = liverpool->regs.ps_inputs[ConditionalBuffers::InstanceInput(fs ? fs->pgm_hash : 0)];
+        if (direct_instances && vs && fs &&
+            ConditionalBuffers::MatchesInstance(vs->pgm_hash, fs->pgm_hash,
+                instance_input.input_offset, instance_input.flat_shade) &&
+            vs->buffers.size() == 7 && fs->buffers.size() == 24 &&
+            fs->buffers[7].sharp_idx == ConditionalBuffers::InstanceSharp(fs->pgm_hash, 7) && fs->buffers[7].used_as_readconst &&
+            !fs->buffers[7].is_written && fs->buffers[8].sharp_idx == ConditionalBuffers::InstanceSharp(fs->pgm_hash, 8) &&
+            fs->buffers[8].used_as_readconst && !fs->buffers[8].is_written) {
+            conditional_instance_mask = ConditionalBuffers::InstanceMask(*direct_instances);
+            static std::array<bool, 2> logged{};
+            const unsigned profile_index = fs->pgm_hash == ConditionalBuffers::InstanceFragmentHash ? 0 : 1;
+            if (!logged[profile_index]) {
+                LOG_INFO(Render_Vulkan,
+                         "Verified instance resource profile: vs={:#x} fs={:#x} first={} count={} mask={:#x}",
+                         vs->pgm_hash, fs->pgm_hash, direct_instances->first,
+                         direct_instances->count, conditional_instance_mask);
+                logged[profile_index] = true;
+            }
+        }
         if (vs && fs && ConditionalBuffers::Matches(vs->pgm_hash, fs->pgm_hash,
                                                     input.input_offset, input.flat_shade) &&
             vs->buffers.size() == 10 && fs->buffers.size() == 24) {
@@ -807,9 +828,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     buffer_bindings.clear();
 
     for (const auto& desc : stage.buffers) {
-        const bool inactive = conditional_selector_snapshot &&
+        const bool inactive = (conditional_selector_snapshot &&
             ConditionalBuffers::IsInactive(stage.pgm_hash, buffer_bindings.size(),
-                                            desc.sharp_idx, conditional_material);
+                                            desc.sharp_idx, conditional_material)) ||
+            ConditionalBuffers::IsInstanceInactive(stage.pgm_hash, buffer_bindings.size(),
+                                                    desc.sharp_idx, conditional_instance_mask);
         const auto vsharp = desc.is_used && !inactive ? desc.GetSharp(stage) : AmdGpu::Buffer::Null();
         if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
             const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());

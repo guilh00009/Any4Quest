@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -13,6 +14,7 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/conditional_buffer_profile.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace AmdGpu {
@@ -113,7 +115,8 @@ private:
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
-    bool BindResources(const Pipeline* pipeline);
+    bool BindResources(const Pipeline* pipeline,
+                       std::optional<ConditionalBuffers::InstanceRange> direct_instances = std::nullopt);
     std::unique_ptr<VideoCore::Buffer> IsolateReadConstGuestBuffer(VAddr addr, u64 size);
     void RetireIsolatedReadConstSnapshots();
 
@@ -161,6 +164,7 @@ private:
     std::vector<std::unique_ptr<VideoCore::Buffer>> isolated_readconst_buffers;
     u32 isolated_readconst_hits{};
     VideoCore::Buffer* conditional_selector_snapshot{};
+    u32 conditional_instance_mask = 0xf; // all branches active unless proven otherwise
     u32 conditional_material = 4; // unknown: preserve normal validation
 
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;

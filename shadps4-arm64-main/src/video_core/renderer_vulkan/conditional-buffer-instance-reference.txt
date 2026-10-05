@@ -1,0 +1,53 @@
+Direct-instance resource liveness -- CUSA08291 01.00 first-scene investigation
+
+Root cause: the host eagerly resolved every statically used fragment buffer before
+executing the shader. Two fragment shaders contain buffers used only by particular
+InstanceId&3 branches. The observed direct draw has firstInstance=0, instanceCount=1;
+branches 2 and 3 cannot execute, but their unused guest descriptors include address
+0x600 and size 0xe9100000. Resolving those unused descriptors asserted in
+MemoryManager::ClampRangeSize. The invalid address was not dereferenced by the guest
+shader's active branch. Assertions and memory mapping behavior remain unchanged.
+
+Verified profiles (shader binary hashes, no game-derived binaries included):
+VS c5c13d3c7614a1b7 / FS be588d5ae93aadab:
+  flat FS input2 -> VS Param4; buffer7 sharp108 reads only selector3;
+  buffer8 sharp112 reads only selector2; VS/FS buffer counts 7/24.
+VS 7a748a197614a1b7 / FS 49dedda558135ca5:
+  flat FS input3 -> VS Param4; buffer7 sharp112 reads only selector3;
+  buffer8 sharp116 reads only selector2; VS/FS buffer counts 7/24.
+
+Both normalized VS IRs are identical. Their Param4.x export is a float bitcast of
+((InstanceId & 3) | (flag << 31)). The fragment selectors bitcast the flat input and
+mask with 3. Every ReadConstBuffer for the two target bindings was checked, including
+the second fragment variant's later reads: buffer7 is guarded by selector==3 and
+buffer8 by selector==2. The high flag bit does not influence this selector.
+SPIR-V emission maps InstanceId directly to InstanceIndex. The draw's first instance
+and count are the same values passed to vkCmdDraw/vkCmdDrawIndexed, not approximated
+from constant memory or inferred from the bad address.
+
+Implementation: compute a four-bit union of selectors for the complete direct draw.
+Four or more consecutive instances conservatively activate every branch. Unknown
+and indirect ranges also activate all branches. Only an exact known shader pair,
+correct flat routing, buffer counts, sharp indices and read-only constant-buffer
+metadata allow omission. Active, mismatched and unknown resources keep normal
+validation. No draw, assertion or shader instruction is skipped.
+
+This differs from the earlier menu profile, which snapshots a uniform selector from
+VS constant memory. The prior uniform profile is retained without broadening it.
+
+Tests: tools/tests/instance_buffer_test.cpp covers 1298 assertions over direct ranges,
+wraparound, all selector masks, active resources, metadata mismatches, cross-pairs
+and unknown cases. Existing conditional_buffer_test.cpp retains its 34 passing checks.
+Temporary memory/descriptor diagnostics were removed from the final source.
+
+Local evidence: desktop-test-20261005-021032 reproduced the first bad binding;
+desktop-test-20261005-022320 confirmed the second variant's exact sharp indices.
+desktop-test-20261005-022608 reached the initial 3D scene for a 150-second mono run
+with zero Critical entries and visible response to synthetic yaw. It stopped at
+the unanswered voice-control opt-in. This is not physical headset/controller proof.
+
+Limits: only these verified shader variants are covered. Indirect draws are not
+analyzed. Unknown shaders may require further work; no universal compatibility claim.
+The desktop compositor still approximates the radial blend and omits visible
+overlays. Headset timing/FOV/pose and real Quest2/3/3S two-Move behavior need hardware
+validation separately. No guest completion-label writes were added.

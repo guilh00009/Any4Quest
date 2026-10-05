@@ -120,7 +120,8 @@ public:
                               std::array<float, 4> screen_uv = {1, 1, 0, 0},
                               std::array<float, 4> preview_near_uv = {},
                               std::array<float, 4> preview_view_uv = {},
-                              std::array<float, 4> preview_band = {});
+                              std::array<float, 4> preview_band = {},
+                                std::array<std::array<float, 4>, 3> preview_right_uv = {});
 
     /// Hands a frame made by PrepareHmdFrame to the VR host. Returns false for a frame that is
     /// not one of the host's, which has to be presented as usual.

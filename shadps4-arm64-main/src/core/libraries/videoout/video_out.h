@@ -145,11 +145,12 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
 
 /// One stereo frame handed to the headset by the HMD reprojection.
 struct HmdFrame {
-    bool is_2d{}; ///< Desktop preview of a cinematic screen; not a stereo/head-pose frame.
+    bool is_2d{}; ///< Desktop-only presentation; never a headset/head-pose frame.
     std::array<float, 4> screen_uv{1, 1, 0, 0};
     std::array<float, 4> preview_near_uv{};
     std::array<float, 4> preview_view_uv{};
-    std::array<float, 4> preview_band{};
+    std::array<float, 4> preview_band{}; // start, end, enabled, desktop stereo
+    std::array<std::array<float, 4>, 3> preview_right_uv{};
     std::array<AmdGpu::Image, 2> eye_textures; ///< Guest texture descriptors, left then right.
     Core::Vr::Fov fov;                         ///< Field of view the eyes were rendered with.
     /// Head pose used for rendering: in tracker space as the title hands it in, in the host's
