@@ -26,6 +26,10 @@ public:
         float sharpen = 0.0f;
         /// For an output image of an sRGB format, which does the encoding for display itself.
         u32 linear_out = 0;
+        std::array<float, 4> uv_transform{1, 1, 0, 0};
+        std::array<float, 4> preview_near_uv{};
+        std::array<float, 4> preview_view_uv{};
+        std::array<float, 4> preview_band{};
     };
 
     void Create(const Instance& instance, MasterSemaphore* master_semaphore,

@@ -111,17 +111,21 @@ int PS4_SYSV_ABI fex_libc_cxa_atexit(void (*func)(void*), void* arg, void* dso_h
     return 0;
 }
 
-void RegisterFexLibcCxaAliases(Core::Loader::SymbolsResolver* sym) {
+void RegisterLibcCxaGuards(Core::Loader::SymbolsResolver* sym) {
     LIB_FUNCTION("3GPpjQdAMTw", "libc", 1, "libc", fex_libc_cxa_guard_acquire);
     LIB_FUNCTION("9rAeANT2tyE", "libc", 1, "libc", fex_libc_cxa_guard_release);
     LIB_FUNCTION("2emaaluWzUw", "libc", 1, "libc", fex_libc_cxa_guard_abort);
-    // FEX adapter looks up C++ runtime symbols under libSceLibcInternal.
+    // The HLE fallback and FEX adapter both need the internal libc exports.
     LIB_FUNCTION("3GPpjQdAMTw", "libSceLibcInternal", 1, "libSceLibcInternal",
                  fex_libc_cxa_guard_acquire);
     LIB_FUNCTION("9rAeANT2tyE", "libSceLibcInternal", 1, "libSceLibcInternal",
                  fex_libc_cxa_guard_release);
     LIB_FUNCTION("2emaaluWzUw", "libSceLibcInternal", 1, "libSceLibcInternal",
                  fex_libc_cxa_guard_abort);
+}
+
+void RegisterFexLibcCxaAliases(Core::Loader::SymbolsResolver* sym) {
+    RegisterLibcCxaGuards(sym);
     LIB_FUNCTION("tsvEmnenz48", "libSceLibcInternal", 1, "libSceLibcInternal",
                  fex_libc_cxa_atexit);
 }

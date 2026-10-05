@@ -41,6 +41,13 @@ void ThreadState::Collect(Pthread* curthread) {
                 ++it;
                 continue;
             }
+#ifdef _WIN64
+            // TidTerminated is published before ExitThread finishes using Pthread.
+            if (!td->native_thr.HasExited()) {
+                ++it;
+                continue;
+            }
+#endif
             FreeStack(&td->attr);
             work_list.push_back(td);
             it = gc_list.erase(it);

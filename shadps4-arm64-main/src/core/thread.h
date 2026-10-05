@@ -25,6 +25,9 @@ public:
     void Exit();
 
     void Initialize();
+#ifdef _WIN64
+    bool HasExited() const;
+#endif
 
     uintptr_t GetHandle() {
         return reinterpret_cast<uintptr_t>(native_handle);

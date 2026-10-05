@@ -160,6 +160,9 @@ private:
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
     std::vector<std::unique_ptr<VideoCore::Buffer>> isolated_readconst_buffers;
     u32 isolated_readconst_hits{};
+    VideoCore::Buffer* conditional_selector_snapshot{};
+    u32 conditional_material = 4; // unknown: preserve normal validation
+
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::small_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};

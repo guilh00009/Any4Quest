@@ -38,6 +38,8 @@ struct BufferResource {
     bool is_written{};
     bool is_formatted{};
     bool used_as_readconst{};
+    // Set after lowering and dead-code elimination; retain sharp for specialization.
+    bool is_used{true};
 
     bool IsSpecial() const noexcept {
         return buffer_type != BufferType::Guest;

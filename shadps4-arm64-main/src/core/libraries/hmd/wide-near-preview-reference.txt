@@ -1,0 +1,31 @@
+Experimental desktop WideNear preview -- 2026-10-05
+
+The Inpatient CUSA08291 01.00 Main Menu is visibly presented with headset=0.
+Evidence: desktop-test-20261005-014428 and screenshot
+CUSA08291_20261005_014456_702_hud_000004.png (kept locally).
+No game input was sent. Headset, gameplay, and controller interaction are unverified.
+
+Enable only with SHADPS4_EXPERIMENTAL_WIDE_NEAR_PREVIEW=1.
+The default path remains disabled. A separate Desktop Preview launcher is supplied.
+The prior verified 2D binary is retained at task-2/shadps4-2d-verified.exe.
+
+Implementation: reconstruct tangent coordinates from the observed full-view UV,
+sample the near and wide portions of the same atlas, and blend linearly with
+clamp((length(tangent)-transition_start)/(transition_end-transition_start),0,1).
+GDC 2017 AAA on a VR Budget describes a near circle and enlarged blend region:
+https://media.gdcvault.com/gdc2017/Presentations/Erjavec_Rok_AAAOnVRBudget.pdf#page=47
+The linear radial curve is an explicit approximation, not a verified Sony curve.
+
+Scope: mono left-eye desktop output, observed 1920x1080 shared-atlas layout,
+flags value 5, finite positive UV scales and ordered radial bounds. Unsupported
+layouts return unsupported only when opted in. No guest label writes are made.
+Visible overlays are omitted. The captured menu overlays were transparent;
+this does not establish correctness for later visible overlays or other games.
+There is no headset reprojection, pose correction, or timing/label protocol claim.
+The peripheral black mask and varying source resolution remain visible.
+
+Validation: Release x64 OpenXR build succeeded. wide_near_preview_test.cpp passed
+8 checks including 10,368 coverage/alignment samples using observed UV mappings
+and a synthetic coordinate ramp. Desktop run was bounded to 90 seconds.
+Executable SHA256: 4886829C7B245008AE08EFE8519D5DE7234FD42FDE6B4C40E66E38153DF99682.
+All source changes remain unstaged on existing main; no commit or push.

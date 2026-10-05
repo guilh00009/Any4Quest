@@ -7,6 +7,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "common/alignment.h"
+#include "video_core/renderer_vulkan/conditional_buffer_profile.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/readconst_snapshot_diag.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -577,6 +578,31 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_infos.clear();
     image_infos.clear();
 
+    conditional_selector_snapshot = nullptr;
+    conditional_material = 4;
+    if (!pipeline->IsCompute()) {
+        const auto* vs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Vertex)];
+        const auto* fs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Fragment)];
+        const auto& input = liverpool->regs.ps_inputs[3];
+        if (vs && fs && ConditionalBuffers::Matches(vs->pgm_hash, fs->pgm_hash,
+                                                    input.input_offset, input.flat_shade) &&
+            vs->buffers.size() == 10 && fs->buffers.size() == 24) {
+            const auto& selector = vs->buffers[0];
+            const auto sharp = selector.GetSharp(*vs);
+            const auto size = sharp.GetSize();
+            if (selector.sharp_idx == 88 && selector.used_as_readconst && !selector.is_written &&
+                size >= 12 && size <= 65536 && memory->IsValidMapping(sharp.base_address, size)) {
+                // Synchronize GPU writes, then bind the exact bytes used for the CPU predicate.
+                buffer_cache.ReadMemory(sharp.base_address, size);
+                auto snapshot = IsolateReadConstGuestBuffer(sharp.base_address, size);
+                std::array<u32, 3> words;
+                std::memcpy(words.data(), snapshot->mapped_data.data(), sizeof(words));
+                conditional_material = ConditionalBuffers::Material(words[0], words[2]);
+                conditional_selector_snapshot = snapshot.get();
+                isolated_readconst_buffers.push_back(std::move(snapshot));
+            }
+        }
+    }
     bool uses_dma = false;
 
     // Bind resource buffers and textures.
@@ -781,7 +807,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     buffer_bindings.clear();
 
     for (const auto& desc : stage.buffers) {
-        const auto vsharp = desc.GetSharp(stage);
+        const bool inactive = conditional_selector_snapshot &&
+            ConditionalBuffers::IsInactive(stage.pgm_hash, buffer_bindings.size(),
+                                            desc.sharp_idx, conditional_material);
+        const auto vsharp = desc.is_used && !inactive ? desc.GetSharp(stage) : AmdGpu::Buffer::Null();
         if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
             const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
             const auto buffer_id = buffer_cache.FindBuffer(vsharp.base_address, size);
@@ -799,7 +828,19 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         const u32 alignment =
             is_storage ? instance.StorageMinAlignment() : instance.UniformMinAlignment();
         // Buffer is not from the cache, either a special buffer or unbound.
-        if (ShouldIsolateReadConstBuffer(stage.pgm_hash, stage.stage, desc.used_as_readconst,
+        if (conditional_selector_snapshot && stage.pgm_hash == ConditionalBuffers::VertexHash &&
+            i == 0 && desc.sharp_idx == 88) {
+            buffer_infos.emplace_back(conditional_selector_snapshot->Handle(), 0, size);
+            buffer_barriers.emplace_back(vk::BufferMemoryBarrier2{
+                .srcStageMask = vk::PipelineStageFlagBits2::eHost,
+                .srcAccessMask = vk::AccessFlagBits2::eHostWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+                .buffer = conditional_selector_snapshot->Handle(),
+                .offset = 0,
+                .size = size,
+            });
+        } else if (ShouldIsolateReadConstBuffer(stage.pgm_hash, stage.stage, desc.used_as_readconst,
                                          desc.is_written) &&
             vsharp.base_address != 0 && size > 0) {
             auto isolated = IsolateReadConstGuestBuffer(vsharp.base_address, size);

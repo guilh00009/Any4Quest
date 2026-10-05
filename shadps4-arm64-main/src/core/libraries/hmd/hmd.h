@@ -113,6 +113,8 @@ struct OrbisHmdReprojectionTrackerState {
     u32 padding1;
 };
 
+struct Reprojection2dParam;
+
 // Reprojection
 s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer();
 s32 PS4_SYSV_ABI sceHmdReprojectionAddDisplayBuffer();
@@ -140,12 +142,12 @@ s32 PS4_SYSV_ABI sceHmdReprojectionSetUserEventStart(Libraries::Kernel::OrbisKer
 s32 PS4_SYSV_ABI sceHmdReprojectionStart(const OrbisHmdReprojectionParam* param,
                                          const OrbisHmdReprojectionTrackerState* tracker_state,
                                          s64 flip_arg, s32 option);
-s32 PS4_SYSV_ABI sceHmdReprojectionStart2dVr();
+s32 PS4_SYSV_ABI sceHmdReprojectionStart2dVr(const Reprojection2dParam* param, s64 flip_arg, void* option);
 s32 PS4_SYSV_ABI sceHmdReprojectionStartCapture();
 s32 PS4_SYSV_ABI sceHmdReprojectionStartLiveCapture();
 s32 PS4_SYSV_ABI sceHmdReprojectionStartMultilayer2();
 s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNear();
-s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay();
+s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param, const OrbisHmdReprojectionTrackerState* tracker, s64 flip_arg, const void* overlay, void* option);
 s32 PS4_SYSV_ABI sceHmdReprojectionStartWithOverlay();
 s32 PS4_SYSV_ABI sceHmdReprojectionStop();
 s32 PS4_SYSV_ABI sceHmdReprojectionStopCapture();

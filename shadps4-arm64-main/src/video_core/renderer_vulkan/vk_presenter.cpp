@@ -846,7 +846,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 }
 
 HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textures, u32 frame_id,
-                                     u32& eye_width, u32& eye_height) {
+                                     u32& eye_width, u32& eye_height, bool screen_2d,
+                                     std::array<float, 4> screen_uv, std::array<float, 4> preview_near_uv,
+                                     std::array<float, 4> preview_view_uv, std::array<float, 4> preview_band) {
     // The guest hands the eyes over as plain textures; they were rendered as color targets, so
     // the cache already holds their contents.
     std::array<VideoCore::TextureCache::ImageDesc, 2> descs;
@@ -892,15 +894,16 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     const auto& left_info = texture_cache.GetImage(image_ids[0]).info;
     eye_width = left_info.size.width;
     eye_height = left_info.size.height;
+    if (preview_band[2] != 0) eye_width /= 2;
 
     // With a VR host attached the frame goes into one of its buffers instead of the window. A
     // headset of the machine's own gets a frame of its own next to the window's: the eyes'
     // pictures at their full size, where the window only has a look at them.
-    Frame* frame = vr_exporter->Acquire(swapchain.GetSurfaceFormat().format);
+    Frame* frame = screen_2d ? nullptr : vr_exporter->Acquire(swapchain.GetSurfaceFormat().format);
     const bool exported = frame != nullptr;
-    Frame* const local = exported ? nullptr : vr_exporter->AcquireLocal(eye_width * 2, eye_height);
+    Frame* const local = (exported || screen_2d) ? nullptr : vr_exporter->AcquireLocal(eye_width * 2, eye_height);
     if (!exported) {
-        expected_ratio = static_cast<float>(eye_width * 2) / static_cast<float>(eye_height);
+        expected_ratio = static_cast<float>(eye_width * (screen_2d ? 1 : 2)) / static_cast<float>(eye_height);
         frame = GetRenderFrame();
         if (!frame && !local) {
             return {};
@@ -949,16 +952,17 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     }
     // Left eye on the left half, right eye on the right half.
     const auto regions_for = [&](const Frame& target) {
-        const u32 half_width = target.width / 2;
-        std::array<HostPasses::PostProcessingPass::Region, 2> regions;
-        for (u32 eye = 0; eye < 2; ++eye) {
-            regions[eye] = {
+        const u32 count = screen_2d ? 1 : 2;
+        const u32 half_width = target.width / count;
+        boost::container::static_vector<HostPasses::PostProcessingPass::Region, 2> regions;
+        for (u32 eye = 0; eye < count; ++eye) {
+            regions.push_back({
                 .input = eye_views[eye],
                 .area{
                     .offset{.x = static_cast<s32>(eye * half_width), .y = 0},
                     .extent{.width = half_width, .height = target.height},
                 },
-            };
+            });
         }
         return regions;
     };
@@ -972,10 +976,15 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     }();
     auto hmd_settings = pp_settings;
     hmd_settings.sharpen = sharpen;
+    if (screen_2d) hmd_settings.uv_transform = screen_uv;
+    hmd_settings.preview_near_uv = preview_near_uv;
+    hmd_settings.preview_view_uv = preview_view_uv;
+    hmd_settings.preview_band = preview_band;
+    if (preview_band[2] != 0) hmd_settings.sharpen = 0;
     if (frame != nullptr) {
         // The marker is for hosts that only see the picture; a VR host is told the frame's id.
         pp_pass.Render(cmdbuf, regions_for(*frame), *frame, hmd_settings,
-                       exported ? std::nullopt : std::optional<u32>{frame_id});
+                       (exported || screen_2d) ? std::nullopt : std::optional<u32>{frame_id});
         if (exported) {
             vr_exporter->Finalize(frame, cmdbuf);
         }
@@ -988,7 +997,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
         hmd_pp_pass.Render(cmdbuf, regions_for(*local), *local, local_settings);
         DebugState.output_resolution = {local->width, local->height};
     }
-    DebugState.game_resolution = {eye_width * 2, eye_height};
+    DebugState.game_resolution = {eye_width * (screen_2d ? 1 : 2), eye_height};
 
     // Flush frame creation commands.
     for (Frame* target : {frame, local}) {

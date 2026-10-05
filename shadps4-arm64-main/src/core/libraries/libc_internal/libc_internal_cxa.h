@@ -17,6 +17,9 @@ void PS4_SYSV_ABI fex_libc_cxa_guard_abort(u64* guard_object);
 
 int PS4_SYSV_ABI fex_libc_cxa_atexit(void (*func)(void*), void* arg, void* dso_handle);
 
+// Register only when using HLE libc; native guest libc retains its own guards.
+void RegisterLibcCxaGuards(Core::Loader::SymbolsResolver* sym);
+
 void RegisterFexLibcCxaAliases(Core::Loader::SymbolsResolver* sym);
 
 } // namespace Libraries::LibcInternal

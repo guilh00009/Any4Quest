@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdlib>
+#include "core/libraries/hmd/wide_near_abi.h"
+#include "core/libraries/hmd/wide_near_preview.h"
 #include <mutex>
 
 #include "common/logging/log.h"
+#include "core/memory.h"
+#include "core/libraries/hmd/reprojection_2d.h"
 #include "core/guest_cpu/guest_watchdog.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/hmd/hmd.h"
@@ -267,9 +272,42 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStart(const OrbisHmdReprojectionParam* param,
     return ORBIS_OK;
 }
 
-s32 PS4_SYSV_ABI sceHmdReprojectionStart2dVr() {
-    LOG_ERROR(Lib_Hmd, "(STUBBED) called");
-    return ORBIS_OK;
+s32 PS4_SYSV_ABI sceHmdReprojectionStart2dVr(const Reprojection2dParam* param,
+                                             s64 flip_arg, void* option) {
+    auto* memory = Core::Memory::Instance();
+    if (!param || !memory->IsValidMapping(reinterpret_cast<VAddr>(param), sizeof(*param)))
+        return ORBIS_HMD_ERROR_PARAMETER_NULL;
+    const auto p = *param;
+    if (!p.texture || !p.sampler || !p.label)
+        return ORBIS_HMD_ERROR_PARAMETER_NULL;
+    if (option || !Valid2dValues(p) ||
+        !memory->IsValidMapping(p.texture, sizeof(AmdGpu::Image)) ||
+        !memory->IsValidMapping(p.sampler, 16) || !memory->IsValidMapping(p.label, 8))
+        return ORBIS_HMD_ERROR_PARAMETER_INVALID;
+
+    Libraries::VideoOut::HmdFrame frame{};
+    std::memcpy(&frame.eye_textures[0], reinterpret_cast<const void*>(p.texture), sizeof(AmdGpu::Image));
+    frame.eye_textures[1] = frame.eye_textures[0];
+    frame.is_2d = true;
+    frame.screen_uv = p.uv;
+    frame.flip_arg = flip_arg;
+    s32 handle;
+    u32 number;
+    {
+        std::scoped_lock lock{g_reprojection.mutex};
+        if (!g_reprojection.initialized || g_reprojection.video_out_handle < 0)
+            return ORBIS_HMD_ERROR_NOT_INITIALIZED;
+        handle = g_reprojection.video_out_handle;
+        number = g_reprojection.submitted_frames++;
+        frame.display_index = g_reprojection.display_index[number & 1];
+    }
+    if (number < 3)
+        LOG_INFO(Lib_Hmd, "2D VR desktop preview frame={} texture={}x{} uv={}/{}/{}/{} time_us={}",
+                 flip_arg, frame.eye_textures[0].width+1, frame.eye_textures[0].height+1,
+                 p.uv[0],p.uv[1],p.uv[2],p.uv[3],p.time_us);
+    // No speculative guest label writes. The presentation frame uses the existing
+    // GPU timeline. Headset cinematic-plane geometry is a separate implementation.
+    return Libraries::VideoOut::SubmitHmdFrame(handle, frame);
 }
 
 s32 PS4_SYSV_ABI sceHmdReprojectionStartCapture() {
@@ -292,9 +330,56 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNear() {
     return ORBIS_OK;
 }
 
-s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay() {
-    LOG_ERROR(Lib_Hmd, "(STUBBED) called");
-    return ORBIS_OK;
+s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
+    const OrbisHmdReprojectionTrackerState* tracker, s64 flip_arg, const void* overlay, void* option) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_EXPERIMENTAL_WIDE_NEAR_PREVIEW");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    if (!enabled) {
+        LOG_ERROR(Lib_Hmd, "(STUBBED) called; experimental desktop preview disabled");
+        return ORBIS_OK;
+    }
+    auto* memory = Core::Memory::Instance();
+    if (!param || !overlay || !memory->IsValidMapping(reinterpret_cast<VAddr>(param), sizeof(ObservedAbi::WideNearPrefix)) ||
+        !memory->IsValidMapping(reinterpret_cast<VAddr>(overlay), 0x38))
+        return ORBIS_HMD_ERROR_PARAMETER_NULL;
+    ObservedAbi::WideNearPrefix p{};
+    std::memcpy(&p, param, sizeof(p));
+    // Support only the observed shared-atlas layout. Flag bits remain uninterpreted.
+    if (option || p.flags != 5 || !p.texture[0][0] ||
+        p.texture[0][0] != p.texture[0][1] || p.texture[0][0] != p.texture[1][0] ||
+        p.texture[0][0] != p.texture[1][1] ||
+        !memory->IsValidMapping(p.texture[0][0], sizeof(AmdGpu::Image)) ||
+        !Preview::ValidBand(p.transition_start,p.transition_end))
+        return ORBIS_HMD_ERROR_UNSUPPORTED_FEATURE;
+    Libraries::VideoOut::HmdFrame frame{};
+    std::memcpy(&frame.eye_textures[0], reinterpret_cast<const void*>(p.texture[0][0]), sizeof(AmdGpu::Image));
+    frame.eye_textures[1] = frame.eye_textures[0];
+    frame.is_2d = true; // Mono left-eye desktop preview; never export as a headset frame.
+    std::memcpy(frame.screen_uv.data(), &p.uv[0][0], 16);
+    std::memcpy(frame.preview_near_uv.data(), &p.uv[0][1], 16);
+    std::memcpy(frame.preview_view_uv.data(), static_cast<const u8*>(overlay)+0x18, 16);
+    frame.preview_band = {p.transition_start,p.transition_end,1,0};
+    if (!Preview::ValidMap(frame.screen_uv) || !Preview::ValidMap(frame.preview_near_uv) ||
+        !Preview::ValidMap(frame.preview_view_uv) || frame.eye_textures[0].width+1 != 1920 ||
+        frame.eye_textures[0].height+1 != 1080)
+        return ORBIS_HMD_ERROR_UNSUPPORTED_FEATURE;
+    frame.flip_arg = flip_arg;
+    s32 handle;
+    {
+        std::scoped_lock lock{g_reprojection.mutex};
+        if (!g_reprojection.initialized || g_reprojection.video_out_handle < 0)
+            return ORBIS_HMD_ERROR_NOT_INITIALIZED;
+        handle = g_reprojection.video_out_handle;
+        frame.display_index = g_reprojection.display_index[g_reprojection.submitted_frames++ & 1];
+    }
+    static bool logged{};
+    if (!logged) {
+        LOG_WARNING(Lib_Hmd, "Experimental WideNear desktop preview: left eye, linear radial blend; overlays omitted; no guest label writes");
+        logged = true;
+    }
+    return Libraries::VideoOut::SubmitHmdFrame(handle, frame);
 }
 
 s32 PS4_SYSV_ABI sceHmdReprojectionStartWithOverlay() {

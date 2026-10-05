@@ -1,0 +1,20 @@
+2D reprojection desktop implementation
+
+Independent implementation using publicly described ABI facts:
+https://github.com/nicolas-riera/ALVR-PS4/blob/aa1ea7ed06fed5d442e46d156a46287bfba1649d/client/src/reproj.cpp
+https://github.com/nicolas-riera/ALVR-PS4/blob/aa1ea7ed06fed5d442e46d156a46287bfba1649d/docs/psvr-technical-reference.md
+https://github.com/AlexAltea/orbital/blob/cc408367da6a6ebbf5ac1ac559fefeadc73b2831/tools/ida/db_types.json
+
+ALVR-PS4 documents the 0x50-byte 2D parameter, identity UV transform,
+non-null texture/sampler/label and timing range. Orbital corroborates the
+three-argument entry point. No implementation code was copied from these projects.
+Existing shadPS4 GPL notices remain intact.
+
+Implemented scope: validate the parameter, copy the texture descriptor and UV
+transform, queue GPU rendering, and show the mono texture in the desktop window.
+The ordinary and stereo paths retain identity UV defaults.
+
+Limits: this is a desktop preview, not headset cinematic-plane geometry. No
+speculative writes to the guest label, WideNear composition, or overlay blending.
+The guest's observed initial 2D texture is 1x1 black with UV {1,1,0,0}, time 4000.
+That blank transition is distinct from the later missing WideNear scene.

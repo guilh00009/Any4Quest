@@ -3,11 +3,9 @@
 
 #include "common/alignment.h"
 #include "common/arch.h"
-#include "core/libraries/kernel/threads/pthread.h"
-#include "thread.h"
+#include "common/assert.h"
 #ifdef _WIN64
 #include <windows.h>
-#include "common/ntapi.h"
 #else
 #include <csignal>
 #include <pthread.h>
@@ -17,6 +15,8 @@
 #endif
 #endif
 
+#include "thread.h"
+
 namespace Core {
 
 static constexpr u32 ORBIS_MXCSR = 0x9fc0;
@@ -24,17 +24,26 @@ static constexpr u32 ORBIS_FPUCW = 0x037f;
 
 NativeThread::NativeThread() : native_handle{0} {}
 
-NativeThread::~NativeThread() {}
+NativeThread::~NativeThread() {
+#ifdef _WIN64
+    if (native_handle) {
+        CloseHandle(native_handle);
+    }
+#endif
+}
 
 int NativeThread::Create(ThreadFunc func, void* arg) {
 #ifndef _WIN64
     pthread_t* pthr = reinterpret_cast<pthread_t*>(&native_handle);
     return pthread_create(pthr, nullptr, func, arg);
 #else
-    native_handle = CreateThread(nullptr, 0, func, arg, 0, nullptr);
+    native_handle = CreateThread(nullptr, 0, func, arg, CREATE_SUSPENDED, nullptr);
     if (native_handle == nullptr) {
         return GetLastError();
     }
+    // Publish the handle before the callback can finish and be collected.
+    const auto previous_count = ResumeThread(native_handle);
+    ASSERT(previous_count != static_cast<DWORD>(-1));
     return 0;
 #endif
 }
@@ -47,7 +56,7 @@ void NativeThread::Exit() {
     tid = 0;
 
 #ifdef _WIN64
-    native_handle = nullptr;
+    // Retain the handle until collection observes actual OS-thread completion.
     ExitThread(0);
 #else
     // Disable and free the signal stack.
@@ -63,6 +72,12 @@ void NativeThread::Exit() {
     pthread_exit(nullptr);
 #endif
 }
+
+#ifdef _WIN64
+bool NativeThread::HasExited() const {
+    return native_handle && WaitForSingleObject(native_handle, 0) == WAIT_OBJECT_0;
+}
+#endif
 
 void NativeThread::Initialize() {
 #ifdef ARCH_X86_64
