@@ -21,6 +21,17 @@ if (NOT TARGET Boost::headers)
     add_subdirectory(ext-boost)
 endif()
 
+# Load bundled fmt before spdlog so it uses this target without fetching another copy.
+# fmtlib
+if (NOT TARGET fmt::fmt)
+    include(FetchContent)
+    FetchContent_Declare(fmt
+        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fmt"
+        OVERRIDE_FIND_PACKAGE
+    )
+    FetchContent_MakeAvailable(fmt)
+endif()
+
 # spdlog
 set(SPDLOG_NO_EXCEPTIONS ON)
 set(SPDLOG_DISABLE_GLOBAL_LOGGER ON)
@@ -29,11 +40,6 @@ if (TARGET fmt::fmt)
 endif()
 add_subdirectory(spdlog EXCLUDE_FROM_ALL SYSTEM)
 target_compile_definitions(spdlog PUBLIC SPDLOG_FUNCTION=__func__)
-
-# fmtlib
-if (NOT TARGET fmt::fmt)
-    add_subdirectory(fmt)
-endif()
 
 # FFmpeg
 if (NOT TARGET FFmpeg::ffmpeg)
