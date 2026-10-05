@@ -17,6 +17,7 @@
 #ifdef _WIN32
 #include <windows.h>
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
+static constexpr DWORD MS_CPP_EXCEPTION = 0xE06D7363;
 #else
 #include <csignal>
 #include <pthread.h>
@@ -60,6 +61,10 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     case DBG_PRINTEXCEPTION_WIDE_C:
         // Used by OutputDebugString functions.
         return EXCEPTION_CONTINUE_EXECUTION;
+    case MS_CPP_EXCEPTION:
+        // Vectored handlers run before stack-based C++ catch handlers. Runtime libraries
+        // may catch this exception themselves; shutting down here aborts normal recovery.
+        return EXCEPTION_CONTINUE_SEARCH;
     case MS_VC_EXCEPTION:
         LOG_DEBUG(Debug, "Pass MS_VC_EXCEPTION at {} to handler", address);
         return EXCEPTION_EXECUTE_HANDLER;

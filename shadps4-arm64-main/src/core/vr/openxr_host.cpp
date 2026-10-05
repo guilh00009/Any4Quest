@@ -11,6 +11,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include <windows.h>
 
@@ -27,6 +28,8 @@
 #include "common/thread.h"
 #include "core/vr/openxr_host.h"
 #include "core/vr/vr_move_input.h"
+#include "core/vr/move_capture.h"
+#include "core/libraries/kernel/time.h"
 #include "input/controller.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -227,7 +230,7 @@ std::string AudioDeviceName(const wchar_t* identifier, EDataFlow flow) {
 
 struct OpenXrHost::Impl {
     struct Slot {
-        enum class State { Free, Drawing, Ready, Reading };
+        enum class State { Free, Drawing, Ready, Reading, Copying };
 
         vk::Image image;
         vk::DeviceMemory memory;
@@ -235,14 +238,8 @@ struct OpenXrHost::Impl {
         u32 width{};
         u32 height{};
         State state{State::Free};
+        vk::Fence copy_fence{}; // Pins the source until the GPU copy has completed.
         PresentedFrame info;
-    };
-
-    struct Retired {
-        vk::Image image;
-        vk::DeviceMemory memory;
-        vk::ImageView view;
-        Clock::time_point since;
     };
 
     // Settings.
@@ -250,6 +247,115 @@ struct OpenXrHost::Impl {
     bool track_hands{true};
     bool feed_head{true};
     float predict_ms{20.0f};
+    PFN_xrConvertTimeToWin32PerformanceCounterKHR diagnostic_convert_time{};
+    XrTime diagnostic_display_time{};
+    long long diagnostic_pose_process_us{};
+    u64 diagnostic_clock_interval_us{};
+    unsigned diagnostic_session_generation{}, diagnostic_events{}, diagnostic_markers{};
+    std::array<std::array<char, 512>, 128> diagnostic_recovery_ring{};
+    size_t diagnostic_recovery_count{};
+    bool diagnostic_keys[3]{};
+    bool diagnostic_was_active{}, diagnostic_report_pending{};
+    XrSpaceLocationFlags diagnostic_head_flags{};
+
+    void DiagnosticEvent(const char* reason, XrResult result = XR_SUCCESS) {
+        if (!Diagnostics::Capture::Enabled()) return;
+        auto& entry = diagnostic_recovery_ring[diagnostic_recovery_count++ % diagnostic_recovery_ring.size()];
+        std::snprintf(entry.data(), entry.size(),
+            "us=%llu reason=%s generation=%u state=%d instance=%llu system=%llu session=%llu lost=%d instance_lost=%d result=%d",
+            static_cast<unsigned long long>(Libraries::Kernel::sceKernelGetProcessTime()), reason,
+            diagnostic_session_generation, static_cast<int>(state),
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(instance)),
+            static_cast<unsigned long long>(system),
+            static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(session)),
+            int(session_lost), int(instance_lost), static_cast<int>(result));
+        // Persist the bounded recent lifecycle before entering the runtime call that threw.
+        // Discovery/recovery only: no filesystem work is added to the active frame loop.
+        if (std::strcmp(reason, "xrGetSystem.begin") == 0) {
+            std::ofstream out("user/log/move-recovery.txt", std::ios::trunc);
+            const auto count = std::min(diagnostic_recovery_count, diagnostic_recovery_ring.size());
+            const auto begin = diagnostic_recovery_count - count;
+            for (size_t i = begin; i < diagnostic_recovery_count; ++i)
+                out << diagnostic_recovery_ring[i % diagnostic_recovery_ring.size()].data() << '\n';
+            out.flush();
+        }
+        if (diagnostic_events >= 128) return;
+        ++diagnostic_events;
+        LOG_INFO(Core_Vr, "MOVE_CAPTURE_XR us={} event={} reason={} generation={} state={} "
+                 "instance={} system={} session={} lost={} instance_lost={} result={}",
+                 Libraries::Kernel::sceKernelGetProcessTime(), diagnostic_events, reason,
+                 diagnostic_session_generation, static_cast<int>(state),
+                 reinterpret_cast<uintptr_t>(instance), system, reinterpret_cast<uintptr_t>(session),
+                 session_lost, instance_lost, static_cast<int>(result));
+    }
+    void PollDiagnosticKeys() {
+        if (!Diagnostics::Capture::Enabled()) return;
+        auto& capture = Diagnostics::Capture::Instance();
+        capture.Tick();
+        if (diagnostic_was_active && !capture.Active()) diagnostic_report_pending = true;
+        if (diagnostic_report_pending && !capture.Exporting()) {
+            LOG_INFO(Core_Vr, "Move capture save {}", capture.WriteSucceeded() ? "complete" : "FAILED (check user/log path)");
+            diagnostic_report_pending = false;
+        }
+        diagnostic_was_active = capture.Active();
+        const bool modifiers = (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+                               (GetAsyncKeyState(VK_SHIFT) & 0x8000);
+        for (int i = 0; i < 3; ++i) {
+            const bool down = modifiers && (GetAsyncKeyState(VK_F8 + i) & 0x8000);
+            if (down && !diagnostic_keys[i]) {
+                if (i == 0) {
+                    const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    const auto path = fmt::format("user/log/move-capture-{}.csv", stamp);
+                    if (capture.Start(path)) {
+                        diagnostic_markers = 0;
+                        LOG_INFO(Core_Vr, "Move capture started (120s/60000 rows maximum): {}", path);
+                    }
+                } else if (i == 1 && capture.Active()) {
+                    Diagnostics::Record r{};
+                    r.kind = 4; r.sequence = ++diagnostic_markers;
+                    r.receipt_us = Libraries::Kernel::sceKernelGetProcessTime();
+                    r.generation = Diagnostics::seat_generation.load();
+                    capture.Push(r);
+                } else if (i == 2) {
+                    capture.Stop();
+                }
+            }
+            diagnostic_keys[i] = down;
+        }
+    }
+    void CaptureMoveHost(u32 hand, const MoveHostState& sample, XrTime time,
+                         const XrSpaceLocation& grip, XrResult grip_result) {
+        auto& capture = Diagnostics::Capture::Instance();
+        if (!capture.Active()) return;
+        Diagnostics::Record r{};
+        r.kind = 1; r.hand = hand;
+        r.flags = sample.connected | (sample.device.tracked << 1);
+        r.generation = Diagnostics::seat_generation.load();
+        r.receipt_us = Libraries::Kernel::sceKernelGetProcessTime();
+        r.host_sequence = Diagnostics::host_sequence;
+        r.xr_pose_ns = time; r.xr_display_ns = diagnostic_display_time;
+        r.pose_process_us = diagnostic_pose_process_us;
+        Diagnostics::PutPose(r, 0, grip.pose);
+        Diagnostics::PutPose(r, 14, head_pose);
+        Diagnostics::PutVector(r, 21, sample.device.linear_velocity);
+        Diagnostics::PutVector(r, 24, sample.device.angular_velocity);
+        r.values[27] = static_cast<float>(grip.locationFlags);
+        r.values[29] = sample.linear_velocity_valid | (sample.angular_velocity_valid << 1);
+        r.values[30] = static_cast<float>(grip_result); r.values[32] = predict_ms;
+        r.values[34] = static_cast<float>(diagnostic_head_flags);
+        r.values[35] = static_cast<float>(diagnostic_clock_interval_us);
+        XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
+        XrResult aim_result = XR_ERROR_HANDLE_INVALID;
+        if (diagnostic_aim_spaces[hand] != XR_NULL_HANDLE) {
+            aim_result = xrLocateSpace(diagnostic_aim_spaces[hand], local_space, time, &aim);
+            if (XR_SUCCEEDED(aim_result)) Diagnostics::PutPose(r, 7, aim.pose);
+        }
+        r.values[28] = static_cast<float>(aim.locationFlags);
+        r.values[31] = static_cast<float>(aim_result);
+        capture.Push(r);
+    }
+
 
     // What Connect found.
     bool available{};
@@ -315,6 +421,7 @@ struct OpenXrHost::Impl {
     u32 swapchain_height{};
     vk::Format swapchain_format{vk::Format::eUndefined};
     bool swapchain_failed{};
+    bool retained_gpu_resources{}; // Failed bounded drain: retain ownership until process exit.
 
     vk::CommandPool command_pool;
     std::array<vk::CommandBuffer, NumCommandBuffers> command_buffers;
@@ -326,7 +433,6 @@ struct OpenXrHost::Impl {
     std::array<Slot, NumSlots> slots;
     s32 latest{-1};
     u32 next_slot{};
-    std::vector<Retired> retired;
     std::atomic<bool> accepting{};
     std::atomic<bool> showing{};
     std::atomic<u32> delivered_frames{};
@@ -364,6 +470,8 @@ struct OpenXrHost::Impl {
     XrAction act_finger_press{XR_NULL_HANDLE};
     XrAction act_pose{XR_NULL_HANDLE};
     XrAction act_grip{XR_NULL_HANDLE};
+    XrAction diagnostic_aim{XR_NULL_HANDLE};
+    XrSpace diagnostic_aim_spaces[2]{XR_NULL_HANDLE, XR_NULL_HANDLE};
     XrAction act_rumble{XR_NULL_HANDLE};
     XrPath hand_paths[2]{XR_NULL_PATH, XR_NULL_PATH};
     XrSpace controller_space{XR_NULL_HANDLE};
@@ -457,6 +565,8 @@ struct OpenXrHost::Impl {
             }
             return offered_one;
         };
+        const bool diagnostic_time = Diagnostics::Capture::Enabled() &&
+            enable_if_offered(XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME);
         hand_extension = track_hands && enable_if_offered(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
         has_refresh_rate = enable_if_offered(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
         has_audio_guid = enable_if_offered(XR_OCULUS_AUDIO_DEVICE_GUID_EXTENSION_NAME);
@@ -475,6 +585,9 @@ struct OpenXrHost::Impl {
             instance = XR_NULL_HANDLE;
             return false;
         }
+        diagnostic_convert_time = diagnostic_time ?
+            GetFunction<PFN_xrConvertTimeToWin32PerformanceCounterKHR>(instance,
+                "xrConvertTimeToWin32PerformanceCounterKHR") : nullptr;
         XrInstanceProperties properties{XR_TYPE_INSTANCE_PROPERTIES};
         xrGetInstanceProperties(instance, &properties);
         runtime_name = fmt::format("{} {}.{}.{}", properties.runtimeName,
@@ -495,7 +608,9 @@ struct OpenXrHost::Impl {
         }
         XrSystemGetInfo info{XR_TYPE_SYSTEM_GET_INFO};
         info.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+        DiagnosticEvent("xrGetSystem.begin");
         const XrResult result = xrGetSystem(instance, &info, &system);
+        DiagnosticEvent("xrGetSystem.return", result);
         if (XR_FAILED(result)) {
             system = XR_NULL_SYSTEM_ID;
             if (result != XR_ERROR_FORM_FACTOR_UNAVAILABLE) {
@@ -604,16 +719,25 @@ struct OpenXrHost::Impl {
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("shadPS4:XrHost");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
-        while (!stop.stop_requested() && !device_mismatch && !exit_requested) {
+        while (!stop.stop_requested() && !device_mismatch && !exit_requested && !retained_gpu_resources) {
+            PollDiagnosticKeys();
             if (!EnsureSession()) {
                 Common::StoppableTimedWait(stop, std::chrono::milliseconds{1500});
                 continue;
             }
             RunSession(stop);
+            DiagnosticEvent(stop.stop_requested() ? "RunSession.stop" :
+                (exit_requested ? "RunSession.exit" : "RunSession.session_lost"));
             DestroySession();
+            if (retained_gpu_resources) {
+                // The desktop can keep running, but these GPU objects cannot be
+                // destroyed or reused until their outstanding work is known done.
+                break;
+            }
             if (session_lost) {
                 // A headset that went away comes back as a new one: it is asked for again,
                 // and a session made with what answers.
+                DiagnosticEvent("system.clear.session_lost");
                 session_lost = false;
                 system = XR_NULL_SYSTEM_ID;
                 if (instance_lost) {
@@ -631,6 +755,8 @@ struct OpenXrHost::Impl {
     }
 
     void DestroyInstance() {
+        DiagnosticEvent("DestroyInstance");
+        diagnostic_convert_time = nullptr;
         instance_lost = false;
         system_failures = 0;
         if (instance != XR_NULL_HANDLE) {
@@ -641,6 +767,7 @@ struct OpenXrHost::Impl {
     }
 
     bool EnsureSession() {
+        DiagnosticEvent("EnsureSession.enter");
         if (instance_lost) {
             DestroyInstance();
         }
@@ -699,6 +826,7 @@ struct OpenXrHost::Impl {
                           ResultText(instance, result), session_failures);
             }
             session = XR_NULL_HANDLE;
+            DiagnosticEvent("system.clear.create_session_failed", result);
             // Whatever was wrong, the next attempt starts from the beginning.
             system = XR_NULL_SYSTEM_ID;
             if (result == XR_ERROR_INSTANCE_LOST) {
@@ -736,6 +864,8 @@ struct OpenXrHost::Impl {
             device_mismatch = true;
             return false;
         }
+        ++diagnostic_session_generation;
+        DiagnosticEvent("session.created");
         state = XR_SESSION_STATE_UNKNOWN;
         state_since = Clock::now();
         session_started = state_since;
@@ -823,6 +953,10 @@ struct OpenXrHost::Impl {
         made = made && make(act_grip, "hands", "Hands", XR_ACTION_TYPE_POSE_INPUT, true);
         made = made &&
                make(act_rumble, "rumble", "Rumble", XR_ACTION_TYPE_VIBRATION_OUTPUT, true);
+        if (Diagnostics::Capture::Enabled()) {
+            if (!make(diagnostic_aim, "capture_aim", "Diagnostic aim", XR_ACTION_TYPE_POSE_INPUT, true))
+                diagnostic_aim = XR_NULL_HANDLE;
+        }
         if (!made) {
             LOG_WARNING(Core_Vr, "The headset's controller actions could not be set up");
             return;
@@ -852,6 +986,10 @@ struct OpenXrHost::Impl {
                                      : "/user/hand/right/input/aim/pose");
         bind(act_grip, "/user/hand/left/input/grip/pose");
         bind(act_grip, "/user/hand/right/input/grip/pose");
+        if (diagnostic_aim != XR_NULL_HANDLE) {
+            bind(diagnostic_aim, "/user/hand/left/input/aim/pose");
+            bind(diagnostic_aim, "/user/hand/right/input/aim/pose");
+        }
         bind(act_rumble, "/user/hand/left/output/haptic");
         bind(act_rumble, "/user/hand/right/output/haptic");
         XrInteractionProfileSuggestedBinding suggested{
@@ -889,6 +1027,12 @@ struct OpenXrHost::Impl {
             }
         }
         for (int hand = 0; hand < 2; ++hand) {
+            if (diagnostic_aim != XR_NULL_HANDLE) {
+                space_info.action = diagnostic_aim;
+                space_info.subactionPath = hand_paths[hand];
+                if (XR_FAILED(xrCreateActionSpace(session, &space_info, &diagnostic_aim_spaces[hand])))
+                    diagnostic_aim_spaces[hand] = XR_NULL_HANDLE;
+            }
             space_info.action = act_grip;
             space_info.subactionPath = hand_paths[hand];
             if (XR_FAILED(xrCreateActionSpace(session, &space_info, &grip_spaces[hand]))) {
@@ -966,6 +1110,9 @@ struct OpenXrHost::Impl {
         };
         for (u32 hand = 0; hand < moves_connected.size(); ++hand) {
             MoveHostState sample{};
+            XrSpaceLocation captured_grip{XR_TYPE_SPACE_LOCATION};
+            XrResult captured_result = XR_ERROR_HANDLE_INVALID;
+            if (Diagnostics::Capture::Instance().Active()) ++Diagnostics::host_sequence;
             XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
             get.action = act_grip;
             get.subactionPath = hand_paths[hand];
@@ -996,7 +1143,10 @@ struct OpenXrHost::Impl {
                 static constexpr XrSpaceLocationFlags Tracked =
                     XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
                     XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
-                if (XR_SUCCEEDED(xrLocateSpace(grip_spaces[hand], local_space, time, &location)) &&
+                captured_result = xrLocateSpace(grip_spaces[hand], local_space, time, &location);
+                captured_grip = location;
+                captured_grip.next = nullptr;
+                if (XR_SUCCEEDED(captured_result) &&
                     (location.locationFlags & Valid) == Valid) {
                     sample.device.pose.position = {
                         location.pose.position.x, location.pose.position.y, location.pose.position.z};
@@ -1020,6 +1170,7 @@ struct OpenXrHost::Impl {
                 }
             }
             runtime.UpdateMove(hand, sample);
+            CaptureMoveHost(hand, sample, time, captured_grip, captured_result);
             moves_tracked[hand] = sample.device.tracked;
             if (sample.connected != moves_connected[hand]) {
                 LOG_INFO(Core_Vr, "The {} PS Move controller {}", hand == 0 ? "left" : "right",
@@ -1347,8 +1498,10 @@ struct OpenXrHost::Impl {
     }
 
     void DestroySession() {
+        DiagnosticEvent("DestroySession.begin");
         accepting = false;
         showing = false;
+        ReleaseControllers("the headset's session ended");
         if (Runtime::Instance().IsMoveEnabled()) {
             ReleaseMoveControllers("the headset's session ended");
         }
@@ -1364,8 +1517,18 @@ struct OpenXrHost::Impl {
         }
         was_focused = false;
         // What is being copied has to have been copied before its target goes away.
-        if (command_pool) {
-            (void)graphics.device.waitForFences(fences, true, 1'000'000'000);
+        std::vector<vk::Fence> initialized_fences;
+        for (const auto fence : fences) {
+            if (fence) initialized_fences.push_back(fence);
+        }
+        if (command_pool && !initialized_fences.empty()) {
+            const vk::Result drained = graphics.device.waitForFences(initialized_fences, true, 1'000'000'000);
+            if (drained != vk::Result::eSuccess) {
+                LOG_ERROR(Core_Vr, "Headset GPU work did not drain ({}); disabling headset output "
+                                   "and retaining its resources until process exit. Restart the emulator to recover", vk::to_string(drained));
+                retained_gpu_resources = true;
+                return;
+            }
         }
         DestroySwapchain();
         if (instance != XR_NULL_HANDLE) {
@@ -1378,7 +1541,6 @@ struct OpenXrHost::Impl {
                 tracker = XR_NULL_HANDLE;
             }
         }
-        ReleaseControllers("the headset's session ended");
         move_rumble_applied = {};
         move_rumble_time = {};
         actions_ready = false;
@@ -1388,6 +1550,11 @@ struct OpenXrHost::Impl {
             xrDestroySpace(controller_space);
             controller_space = XR_NULL_HANDLE;
         }
+        for (XrSpace& space : diagnostic_aim_spaces) {
+            if (space != XR_NULL_HANDLE) xrDestroySpace(space);
+            space = XR_NULL_HANDLE;
+        }
+        diagnostic_aim = XR_NULL_HANDLE;
         for (XrSpace& space : grip_spaces) {
             if (space != XR_NULL_HANDLE) {
                 xrDestroySpace(space);
@@ -1422,6 +1589,7 @@ struct OpenXrHost::Impl {
             std::scoped_lock lock{slot_mutex};
             for (Slot& slot : slots) {
                 if (slot.state != Slot::State::Drawing) {
+                    slot.copy_fence = nullptr;
                     slot.state = Slot::State::Free;
                 }
             }
@@ -1437,6 +1605,7 @@ struct OpenXrHost::Impl {
                 const auto& changed =
                     *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
                 state = changed.state;
+                DiagnosticEvent("session.state");
                 LOG_INFO(Core_Vr, "Headset session: {}", StateName(state));
                 if (state != XR_SESSION_STATE_FOCUSED && Runtime::Instance().IsMoveEnabled()) {
                     // Do this before xrEndSession or a blocking frame wait loses the chance.
@@ -1490,6 +1659,15 @@ struct OpenXrHost::Impl {
                     *reinterpret_cast<const XrEventDataReferenceSpaceChangePending*>(&event);
                 if (changed.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
                     space_change_time = changed.changeTime;
+                    DiagnosticEvent("reference_space.local.change_pending");
+                    if (Diagnostics::Capture::Instance().Active()) {
+                        Diagnostics::Record r{}; r.kind = 5;
+                        r.receipt_us = Libraries::Kernel::sceKernelGetProcessTime();
+                        r.xr_pose_ns = changed.changeTime; r.flags = changed.poseValid;
+                        r.generation = Diagnostics::seat_generation.load();
+                        Diagnostics::PutPose(r, 0, changed.poseInPreviousSpace);
+                        Diagnostics::Capture::Instance().Push(r);
+                    }
                 }
                 break;
             }
@@ -1545,6 +1723,7 @@ struct OpenXrHost::Impl {
     void NoteFrameFailure(const char* what, XrResult result) {
         ++frame_failures;
         if (frame_failures <= 5 || frame_failures % 1000 == 0) {
+            DiagnosticEvent(what, result);
             LOG_ERROR(Core_Vr, "{} failed: {} ({} frame calls failed so far)", what,
                       ResultText(instance, result), frame_failures);
         }
@@ -1608,6 +1787,7 @@ struct OpenXrHost::Impl {
     void RunSession(std::stop_token stop) {
         auto& runtime = Runtime::Instance();
         while (!stop.stop_requested() && !session_lost && !exit_requested) {
+            PollDiagnosticKeys();
             PollEvents();
             if (session_lost || exit_requested) {
                 break;
@@ -1682,6 +1862,21 @@ struct OpenXrHost::Impl {
             const XrTime pose_time =
                 frame_state.predictedDisplayTime +
                 static_cast<XrTime>(std::clamp(predict_ms, 0.0f, 80.0f) * 1e6f);
+            diagnostic_display_time = frame_state.predictedDisplayTime;
+            diagnostic_pose_process_us = 0;
+            diagnostic_clock_interval_us = 0;
+            if (Diagnostics::Capture::Instance().Active() && diagnostic_convert_time) {
+                LARGE_INTEGER pose_counter{}, now_counter{}, frequency{};
+                const auto before_clock = Libraries::Kernel::sceKernelGetProcessTime();
+                if (XR_SUCCEEDED(diagnostic_convert_time(instance, pose_time, &pose_counter)) &&
+                    QueryPerformanceCounter(&now_counter) && QueryPerformanceFrequency(&frequency)) {
+                    const auto process_us = Libraries::Kernel::sceKernelGetProcessTime();
+                    diagnostic_clock_interval_us = process_us - before_clock;
+                    diagnostic_pose_process_us = static_cast<long long>(process_us) +
+                        static_cast<long long>((pose_counter.QuadPart - now_counter.QuadPart) *
+                            (1000000.0 / frequency.QuadPart));
+                }
+            }
             UpdateHead(pose_time);
             UpdateControllers(pose_time);
             UpdatePad(pose_time);
@@ -1707,7 +1902,9 @@ struct OpenXrHost::Impl {
                     first_shown_logged = false;
                 }
                 if (slot.state == Slot::State::Reading) {
-                    slot.state = Slot::State::Free;
+                    // Metadata above must be consumed before the producer can
+                    // reuse this slot, even if the copy already finished.
+                    slot.state = slot.copy_fence ? Slot::State::Copying : Slot::State::Free;
                 }
             }
 
@@ -1804,6 +2001,8 @@ struct OpenXrHost::Impl {
             ++head_tracked_frames;
         }
 
+        diagnostic_head_flags = location.locationFlags;
+
         // The headset's own "reset view" moves the space poses are given in: from the moment
         // it says, where the head is then is where the player sits.
         if (space_change_time != 0 && time >= space_change_time) {
@@ -1812,6 +2011,7 @@ struct OpenXrHost::Impl {
                 // against old-space history or replay feedback from the previous tracking frame.
                 ReleaseMoveControllers("the headset's tracking space changed");
             }
+            DiagnosticEvent("reference_space.local.apply");
             space_change_time = 0;
             LOG_INFO(Core_Vr, "View reset in the headset's own system");
             runtime.RequestRecenter();
@@ -2030,6 +2230,18 @@ struct OpenXrHost::Impl {
 
     // --- pictures -----------------------------------------------------------------------------
 
+    // Called under slot_mutex. Only a successful fence observation releases a
+    // source; elapsed time and API submission success are not completion proofs.
+    void ReleaseCompletedCopies() {
+        for (auto& slot : slots) {
+            if (slot.state == Slot::State::Copying && slot.copy_fence &&
+                graphics.device.getFenceStatus(slot.copy_fence) == vk::Result::eSuccess) {
+                slot.copy_fence = nullptr;
+                slot.state = Slot::State::Free;
+            }
+        }
+    }
+
     /// The newest finished frame that has not been shown yet, marked as being read; -1 for none.
     s32 TakeFrame() {
         // SHADPS4_XR_FREEZE_AFTER=<seconds>, for tests: from then on the picture that is being
@@ -2042,6 +2254,7 @@ struct OpenXrHost::Impl {
             return -1;
         }
         std::scoped_lock lock{slot_mutex};
+        ReleaseCompletedCopies();
         if (latest < 0 || slots[latest].state != Slot::State::Ready) {
             return -1;
         }
@@ -2063,7 +2276,15 @@ struct OpenXrHost::Impl {
             return false;
         }
         if (swapchain != XR_NULL_HANDLE) {
-            (void)graphics.device.waitForFences(fences, true, 1'000'000'000);
+            const vk::Result resized = graphics.device.waitForFences(fences, true, 1'000'000'000);
+            if (resized != vk::Result::eSuccess) {
+                LOG_ERROR(Core_Vr, "Headset resize postponed: GPU copies did not finish ({})",
+                          vk::to_string(resized));
+                return false;
+            }
+            // The previous projection described the old swapchain. Only a
+            // successful copy into the replacement may make it visible again.
+            have_frame = false;
             DestroySwapchain();
         }
 
@@ -2149,6 +2370,16 @@ struct OpenXrHost::Impl {
             blank = true;
             return false;
         }
+        // A timed-out fence still owns its command buffer. Wait before acquiring a
+        // runtime image so a retry needs neither an invalid release nor a reset of
+        // pending commands. Keep the same buffer index until this wait succeeds.
+        const vk::Device device = graphics.device;
+        const u32 buffer = next_command_buffer;
+        const vk::Result fence_wait = device.waitForFences(fences[buffer], true, 1'000'000'000);
+        if (fence_wait != vk::Result::eSuccess) {
+            LOG_ERROR(Core_Vr, "Headset copy fence did not complete: {}", vk::to_string(fence_wait));
+            return false;
+        }
         if (!EnsureSwapchain(width, height)) {
             return false;
         }
@@ -2165,17 +2396,27 @@ struct OpenXrHost::Impl {
             return false;
         }
         XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-        wait.timeout = XR_INFINITE_DURATION;
+        wait.timeout = 1'000'000'000; // Bound this wait; timeout follows checked session recovery.
         result = xrWaitSwapchainImage(swapchain, &wait);
-        if (XR_FAILED(result)) {
+        if (result != XR_SUCCESS) {
             NoteFrameFailure("xrWaitSwapchainImage", result);
+            // An acquired image whose wait failed cannot be copied or released.
+            // Let the session teardown retire it, and submit no stale projection
+            // in the remainder of this frame. Also handle positive timeout results.
+            accepting = false;
+            have_frame = false;
+            session_lost = true;
+            return false;
         }
         const vk::Image target{swapchain_images[image_index].image};
 
-        const vk::Device device = graphics.device;
-        const u32 buffer = next_command_buffer;
+        // The successful wait above proves all older copies using this fence
+        // complete. Drop their references before resetting/reusing that fence.
+        {
+            std::scoped_lock lock{slot_mutex};
+            ReleaseCompletedCopies();
+        }
         next_command_buffer = (next_command_buffer + 1) % NumCommandBuffers;
-        (void)device.waitForFences(fences[buffer], true, 1'000'000'000);
         (void)device.resetFences(fences[buffer]);
         const vk::CommandBuffer cmdbuf = command_buffers[buffer];
         (void)cmdbuf.reset();
@@ -2293,6 +2534,10 @@ struct OpenXrHost::Impl {
             };
             submitted =
                 graphics.queue.submit(submit_info, fences[buffer]) == vk::Result::eSuccess;
+            if (submitted) {
+                std::scoped_lock slot_lock{slot_mutex};
+                slots[index].copy_fence = fences[buffer];
+            }
             XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             result = xrReleaseSwapchainImage(swapchain, &release);
         }
@@ -2461,34 +2706,21 @@ struct OpenXrHost::Impl {
 
     // --- the images frames are drawn into, for the threads that draw and present --------------
 
-    void Retire(Slot& slot) {
-        if (slot.image) {
-            retired.push_back({slot.image, slot.memory, slot.view, Clock::now()});
-        }
-        slot.image = nullptr;
-        slot.memory = nullptr;
-        slot.view = nullptr;
-        slot.width = 0;
-        slot.height = 0;
-    }
-
-    void DestroyRetired() {
-        // Whatever still used an image that was replaced has long finished by then.
-        const auto now = Clock::now();
-        std::erase_if(retired, [&](const Retired& old) {
-            if (now - old.since < std::chrono::seconds{3}) {
-                return false;
-            }
-            graphics.device.destroyImageView(old.view);
-            graphics.device.destroyImage(old.image);
-            graphics.device.freeMemory(old.memory);
-            return true;
-        });
-    }
-
     bool Create(Slot& slot, u32 width, u32 height) {
+        if ((slot.state != Slot::State::Free && slot.state != Slot::State::Ready) || slot.copy_fence) {
+            return false;
+        }
         const vk::Device device = graphics.device;
-        Retire(slot);
+        // BeginFrame only chooses Free/Ready slots. EndFrame proved the
+        // producer timeline complete; Copying slots stay pinned by their fence.
+        if (slot.image) {
+            device.destroyImageView(slot.view);
+            device.destroyImage(slot.image);
+            device.freeMemory(slot.memory);
+            slot.image = nullptr;
+            slot.view = nullptr;
+            slot.memory = nullptr;
+        }
         const auto [image_result, image] = device.createImage(vk::ImageCreateInfo{
             .imageType = vk::ImageType::e2D,
             .format = FrameFormat,
@@ -2570,7 +2802,7 @@ void OpenXrHost::Shutdown() {
         impl->thread.request_stop();
         impl->thread.join();
     }
-    if (impl->instance != XR_NULL_HANDLE) {
+    if (impl->instance != XR_NULL_HANDLE && !impl->retained_gpu_resources) {
         xrDestroyInstance(impl->instance);
         impl->instance = XR_NULL_HANDLE;
         impl->system = XR_NULL_SYSTEM_ID;
@@ -2701,7 +2933,6 @@ std::optional<OpenXrHost::Target> OpenXrHost::BeginFrame(u32 width, u32 height) 
         return std::nullopt;
     }
     std::scoped_lock lock{impl->slot_mutex};
-    impl->DestroyRetired();
     for (u32 attempt = 0; attempt < NumSlots; ++attempt) {
         const u32 index = (impl->next_slot + attempt) % NumSlots;
         Impl::Slot& slot = impl->slots[index];
@@ -2757,10 +2988,11 @@ void OpenXrHost::DropFrame(u32 index) {
     std::scoped_lock lock{impl->slot_mutex};
     Impl::Slot& slot = impl->slots[index % NumSlots];
     if (slot.state == Impl::Slot::State::Drawing) {
-        slot.state = Impl::Slot::State::Free;
+        // This legacy API has no producer completion token. Retain ownership;
+        // EndFrame is the only handoff that proves the producer timeline done.
+        LOG_WARNING(Core_Vr, "Cannot recycle dropped headset frame without producer completion");
     }
 }
-
 bool OpenXrHost::IsShowing() const {
     return impl->showing.load(std::memory_order_relaxed);
 }

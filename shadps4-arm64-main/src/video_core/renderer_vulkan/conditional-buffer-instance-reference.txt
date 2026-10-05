@@ -1,3 +1,5 @@
+Historical instance-profile evidence. The hash-specific instance implementation has been superseded by general-resource-liveness-reference.txt.
+
 Direct-instance resource liveness -- CUSA08291 01.00 first-scene investigation
 
 Root cause: the host eagerly resolved every statically used fragment buffer before

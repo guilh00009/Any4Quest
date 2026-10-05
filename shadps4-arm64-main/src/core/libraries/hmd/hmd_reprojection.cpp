@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include "core/libraries/hmd/wide_near_abi.h"
 #include "core/libraries/hmd/wide_near_preview.h"
+#include "core/libraries/hmd/wide_near_vr.h"
 #include <mutex>
 
 #include "common/logging/log.h"
@@ -333,6 +334,8 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNear() {
 s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
     const OrbisHmdReprojectionTrackerState* tracker, s64 flip_arg, const void* overlay, void* option) {
     static const unsigned mode = [] {
+        const char* vr = std::getenv("SHADPS4_EXPERIMENTAL_WIDE_NEAR_VR");
+        if (vr && std::strcmp(vr, "1") == 0) return 3u;
         const char* value = std::getenv("SHADPS4_EXPERIMENTAL_WIDE_NEAR_PREVIEW");
         if (value && std::strcmp(value, "stereo") == 0) return 2u;
         return value && std::strcmp(value, "1") == 0 ? 1u : 0u;
@@ -357,17 +360,17 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
     Libraries::VideoOut::HmdFrame frame{};
     std::memcpy(&frame.eye_textures[0], reinterpret_cast<const void*>(p.texture[0][0]), sizeof(AmdGpu::Image));
     frame.eye_textures[1] = frame.eye_textures[0];
-    frame.is_2d = true; // Both preview modes remain desktop-only; never export to a headset.
+    frame.is_2d = mode != 3; // Headset export requires its own explicit experimental opt-in.
     std::memcpy(frame.screen_uv.data(), &p.uv[0][0], 16);
     std::memcpy(frame.preview_near_uv.data(), &p.uv[0][1], 16);
     std::memcpy(frame.preview_view_uv.data(), static_cast<const u8*>(overlay)+0x18, 16);
-    frame.preview_band = {p.transition_start,p.transition_end,1,mode == 2 ? 1.0f : 0.0f};
+    frame.preview_band = {p.transition_start,p.transition_end,1,mode >= 2 ? 1.0f : 0.0f};
     // Observed caller writes right-eye full-view UV at overlay+0x28, left at +0x18.
     // Both happen to match in this title; preserve them independently.
     std::memcpy(frame.preview_right_uv[0].data(), &p.uv[1][0], 16);
     std::memcpy(frame.preview_right_uv[1].data(), &p.uv[1][1], 16);
     std::memcpy(frame.preview_right_uv[2].data(), static_cast<const u8*>(overlay)+0x28, 16);
-    if (mode == 2 && (!Preview::ValidMap(frame.preview_right_uv[0]) ||
+    if (mode >= 2 && (!Preview::ValidMap(frame.preview_right_uv[0]) ||
                      !Preview::ValidMap(frame.preview_right_uv[1]) ||
                      !Preview::ValidMap(frame.preview_right_uv[2])))
         return ORBIS_HMD_ERROR_UNSUPPORTED_FEATURE;
@@ -375,6 +378,24 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
         !Preview::ValidMap(frame.preview_view_uv) || frame.eye_textures[0].width+1 != 1920 ||
         frame.eye_textures[0].height+1 != 1080)
         return ORBIS_HMD_ERROR_UNSUPPORTED_FEATURE;
+    if (mode == 3) {
+        if (!tracker || !memory->IsValidMapping(reinterpret_cast<VAddr>(tracker), sizeof(*tracker)))
+            return ORBIS_HMD_ERROR_PARAMETER_NULL;
+        OrbisHmdReprojectionTrackerState pose{};
+        std::memcpy(&pose, tracker, sizeof(pose));
+        std::array<float, 4> view{};
+        if (!Preview::ValidRenderPose(pose.position, pose.orientation) ||
+            !Preview::CommonVrView(frame.preview_view_uv, frame.preview_right_uv[2], view))
+            return ORBIS_HMD_ERROR_UNSUPPORTED_FEATURE;
+        frame.preview_view_uv = view;
+        frame.preview_right_uv[2] = view;
+        frame.fov = { .tan_out = .5f/view[0], .tan_in = .5f/view[0],
+                      .tan_top = .5f/view[1], .tan_bottom = .5f/view[1] };
+        frame.render_pose = {
+            .position{pose.position[0], pose.position[1], pose.position[2]},
+            .orientation{pose.orientation[0], pose.orientation[1], pose.orientation[2], pose.orientation[3]},
+        };
+    }
     frame.flip_arg = flip_arg;
     s32 handle;
     {
@@ -386,7 +407,7 @@ s32 PS4_SYSV_ABI sceHmdReprojectionStartWideNearWithOverlay(const void* param,
     }
     static bool logged{};
     if (!logged) {
-        LOG_WARNING(Lib_Hmd, "Experimental WideNear desktop preview: {} eye view(s), linear radial blend; overlays omitted; no guest label writes", mode);
+        LOG_WARNING(Lib_Hmd, "Experimental WideNear mode={} (1=mono desktop, 2=stereo desktop, 3=VR export); linear radial blend; overlays omitted; no guest label writes", mode);
         logged = true;
     }
     return Libraries::VideoOut::SubmitHmdFrame(handle, frame);

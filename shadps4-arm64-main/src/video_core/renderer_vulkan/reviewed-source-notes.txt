@@ -1,0 +1,36 @@
+Independent review follow-up, 2026-10-05
+
+Two local agents independently reviewed resource liveness and stereo OpenXR
+export. Review found and fixed these concrete correctness issues:
+
+1. Each compiled shader permutation now owns stable Shader::Info metadata.
+   Previously the first permutation's info was reused for later modules, including
+   during disk-cache loading. Pipeline/specialization pointers remain stable when
+   module storage grows, and selected module user data/guest addresses refresh.
+2. Original-IR resource proofs are invalidated for external patched or live-
+   replaced SPIR-V, including is_used and the earlier uniform-selector guard.
+3. Both guards reject guest geometry/tessellation and implicit RectList/QuadList
+   auxiliary tessellation, which can modify the assumed VS-to-FS selector route.
+4. ShaderMetaVersion is now 5, invalidating previous cached metadata layouts.
+5. OpenXR copy checks its fence before acquiring/resetting anything. A failed or
+   timed-out image wait does not copy or release an unwaited image. The image wait
+   is bounded to one second; other runtime calls can still block.
+6. Swapchain resize and session teardown check GPU drain results. Resize defers
+   without destroying pending images. Teardown releases input first and waits
+   only initialized fences. Failed drain retains resources and disables headset
+   recreation until process exit; restarting the emulator is required to recover.
+
+Validation: 288 real Program ownership/routing checks; 80,132 existing real-IR
+analysis checks; 11 fault-injection scenarios executing extracted production
+OpenXR guard blocks; affected production objects and full Release/OpenXR build.
+No real OpenXR runtime/headset failure was injected; hardware remains untested.
+
+Reproducible regression entry points (compiler-configured shell):
+python tools/tests/run_resource_liveness.py --build-dir <existing-Ninja-build>
+python tools/tests/run_shader_module_metadata.py --build-dir <existing-Ninja-build>
+python tools/tests/openxr_waits_test.py --compiler clang++
+
+The earlier exact-pair uniform-selector profile remains; this is not a solution
+for arbitrary uniform/memory-dependent resource liveness or every PSVR game.
+WideNear overlay composition, exact PSVR timing and radial blending limitations
+remain as documented. No commit/push/install or system settings change was made.

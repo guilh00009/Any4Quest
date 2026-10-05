@@ -1,0 +1,111 @@
+MOVE CAPTURE - LOCAL TWO-MINUTE DIAGNOSTIC
+
+Launcher: Diagnose The Inpatient - 2 Minute Move Capture.bat
+This uses your existing VR/Move setup. It changes no offsets, pose prediction,
+tracking filters, or game input mapping. No video, microphone, or screen capture.
+Ordinary launchers leave the bounded capture disabled.
+
+Once your save is loaded into a controllable room:
+- Ctrl+Shift+F8: start. Hold the chord briefly (~half a second), then release.
+- Ctrl+Shift+F9: insert a numbered symptom marker; release between markers.
+- Ctrl+Shift+F10: stop early and save.
+These chords are checked only by the diagnostic launcher while OpenXR runs.
+Capture automatically stops at 120 seconds or 60000 records, whichever comes first.
+At completion, allow a few seconds for the background CSV writer before closing.
+Console/log says 'Move capture save complete' or reports failure. Capture cannot
+be restarted while the previous file is exporting. A new start uses a new filename.
+
+Suggested short protocol (seconds from F8):
+0-15: rest both controllers on a stable support in camera view, head still.
+15-30: keep controllers supported; move/turn only your head slowly.
+30-45: raise/lower the left controller slowly, then hold still.
+45-60: repeat with the right controller.
+60-75: briefly occlude the left controller, then restore it and hold still.
+75-90: repeat with the right controller.
+90-105: perform exactly one headset reset-view/recenter; keep hands still.
+105-120: make the movement that usually causes the symptom, or remain still.
+Press F9 with Ctrl+Shift whenever a hand starts sinking/pulling. Note which hand
+and protocol step for each marker. An optional user-recorded video with matching
+marker times would help; this launcher does not create or request recording access.
+
+LOCAL FILES
+pc-vr/user/log/move-capture-<start-epoch-ms>.csv
+pc-vr/user/log/move-recovery.txt
+The CSV is written on stop/timeout/cap, not continuously. A hard process crash
+before export can lose the in-memory pose capture. Stop/save after the symptom
+if possible. Recovery history is separately saved BEFORE xrGetSystem, so the
+specific late discovery exception has the preceding 128 lifecycle events on disk.
+The recovery file is overwritten with a bounded snapshot; preserve it before the
+next diagnostic launch if a crash occurs. Nothing is uploaded automatically.
+
+BOUNDS / COST
+60000 numeric records maximum;272 bytes each: 16,320,000 bytes buffered.
+120 seconds maximum per capture; manual restart is allowed. No per-record file
+I/O or string formatting on tracking/render threads. Export is a background thread.
+Measured four-writer recorder insertion cost ~0.37 microseconds/record in a native
+Windows synthetic test. This excludes real OpenXR/Virtual Desktop cost.
+During active capture: two extra aim xrLocateSpace calls per XR frame and one
+optional xrConvertTimeToWin32PerformanceCounterKHR call per frame. Pose sampling
+stays at actual host rate; the record cap may end capture early at high rates.
+Aim actions and optional time-conversion extension exist only in diagnostic mode.
+Physical headset overhead is unmeasured. The old every-two-second Move log spam
+is disabled by this diagnostic launcher. Other existing emulator logs are unchanged.
+
+CSV SCHEMA1 (numeric, locale-independent default C++ stream formatting)
+Columns: kind,hand,flags,generation,receipt_us,sequence,host_sequence,requested_us,
+returned_us,xr_pose_ns,xr_display_ns,pose_process_us,v0..v47.
+All *_us are guest process-time microseconds, except sequence/counters. XrTime
+fields are the runtime nanosecond domain. Zero pose_process_us means conversion
+unavailable/failed, NOT zero prediction. The mapped time is estimated from paired
+QPC/process-clock reads; kind1 v35 records the bracketing interval in microseconds.
+Pose layout: x,y,z metres then quaternion x,y,z,w. Vectors have x,y,z components.
+Flags and validity must be checked before interpreting a pose. Unknown/unrecorded
+fields are zero. NaN raw input can be recorded for diagnosis but is not fed as tracked.
+
+kind1: host OpenXR sample, hand0 left/hand1 right.
+ flags bit0 connected, bit1 tracked; generation is current seat generation.
+ host_sequence joins kind2's host_sequence from the same host thread.
+ receipt_us is recording time AFTER runtime submission; kind2 gives receipt there.
+ xr_pose_ns is actual time used to locate grip/aim/head; xr_display_ns is predicted
+ display time; pose_process_us is converted xr_pose_ns when extension available.
+ v0..6 raw grip pose; v7..13 comparison aim pose; v14..20 latest raw head pose.
+ v21..23 raw linear velocity m/s; v24..26 raw angular velocity rad/s.
+ v27 grip location flags; v28 aim location flags; v29 bit0 linear-valid/bit1 angular-valid.
+ v30 grip XrResult; v31 aim XrResult; v32 configured extra prediction milliseconds.
+ v34 head location flags; v35 clock-conversion bracket microseconds.
+ Grip/aim invalid poses must not be interpreted; head pose can be last valid when
+ head flags are invalid. Aim is comparison only and never drives the emulated Move.
+
+kind2: Runtime UpdateMove sample and conversion, hand0/1.
+ flags bit0 connected, bit1 tracked, bit2 host linear velocity valid, bit3 angular valid.
+ sequence is Move sample sequence; host_sequence joins kind1 (zero for other hosts).
+ returned_us is assigned Move timestamp; receipt_us is process time at update.
+ v0..6 raw host pose; v7..13 raw head pose; v14..20 exported tracker pose.
+ v21..23 tracker-space linear velocity; v24..26 tracker-space angular velocity.
+ v27..29 synthesized grip-local accelerometer in g; v30..32 grip-local gyro rad/s.
+ v33..35 seat origin; v36..39 seat quaternion; v40..42 configured tracker origin.
+ v43 host sample age_us at receipt. generation is latched with the conversion.
+
+kind3: actual VrTracker Move query; hand/sequence joins kind2.
+ flags bit0 connected, bit1 tracked; generation latched with returned pose.
+ receipt_us is query recording time; requested_us is guest prediction request;
+ returned_us is timestamp actually returned to the game (unchanged behavior).
+ v0..6 returned pose; v7..9 linear velocity; v10..12 angular velocity.
+ v13..15 Move IMU acceleration; v16..18 Move gyro (context only: tracker acceleration
+ fields remain zero, as before). v19 result_type; v20 orientation_type; v21 usage_type.
+ Untracked poses are diagnostic state, not a claimed valid guest tracking result.
+
+kind4: explicit user marker. sequence is marker number; receipt_us identifies time.
+kind5: OpenXR LOCAL reference-space change pending. flags is poseValid;
+ xr_pose_ns is changeTime; v0..6 poseInPreviousSpace; generation is pre-apply seat.
+ Actual application appears in recovery breadcrumbs and following generation values.
+
+RECOVERY HISTORY
+Each line contains process time, reason, session generation/state, instance/system/
+session IDs, loss flags and XrResult. Reasons include EnsureSession entry,
+xrGetSystem begin/return, session creation/state, RunSession exit reason,
+DestroySession/DestroyInstance, system-ID resets and reference-space changes.
+Up to 128 ordinary MOVE_CAPTURE_XR log lines; an independent 128-entry rolling
+history continues after that budget and is saved before each xrGetSystem call.
+This can distinguish discovery/recovery entry without asserting that a runtime
+C++ exception would have been caught. It does not explain internal runtime logic.

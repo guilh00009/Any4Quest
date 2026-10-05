@@ -1,0 +1,40 @@
+Compiler-derived instance resource liveness, 2026-10-05
+
+Replaces the two shader-hash instance profiles with conservative analysis of
+optimized shader IR. No shader hash, title ID, descriptor address or fixed binding
+number participates in the new instance proof.
+
+Cause observed locally: the next scene variant's FS 91c46faae93aadab attempted to
+bind buffer 7, sharp 108, address 0x600, size 0xe9100000. Its VS 9e9ee2c8ed08a094
+exports (InstanceId & 3) plus an unrelated high flag in Param4.x. The FS tests the
+low two bits of flat input2. The address was in an inactive branch. The previously
+last-logged FS 5903876130388f6a was only context, not proof of that binding.
+
+Known-bit abstract evaluation supports immutable bitwise expressions, bitcasts,
+constant shifts, equality and Boolean conditions. Unsupported operations, Phi,
+memory loads, cycles and depth overflow yield unknown. Vertex exports require a
+top-level assignment and agreement of every write. Fragment usage unions every
+buffer access across structured branches; loops, breaks and returns are treated
+conservatively, and uncovered access blocks invalidate the proof. Metadata resets
+on each compilation. ShaderMetaVersion 5 rejects older serialized metadata. Each compiled permutation owns its metadata; patched/replaced SPIR-V invalidates all omission proofs. See reviewed-source-notes.txt.
+
+The renderer links a fragment dependency only to a proven vertex export through
+a flat input, for a direct draw with no geometry/tessellation stage. The complete
+set of low-two-bit residues covers firstInstance and every instance; four or more
+instances retain all branches. Indirect/unknown draws, active paths, writes and
+special buffers retain normal binding and validation. ClampRangeSize is unchanged.
+The earlier synchronized, exact-pair uniform-selector profile remains separate;
+this increment does not solve arbitrary uniform- or memory-dependent liveness.
+
+Regression: tools/tests/instance_buffer_test.cpp now exercises the real IR adapter,
+metadata reset, unconditional second accesses, unknown memory predicates, loops,
+unvisited blocks, conditional exports, multiple returns, active/unknown routing,
+nonzero/overflowing firstInstance, and randomized known-bit soundness: 80,132 checks.
+The previous 34 uniform-profile, 10 buffer-usage and 6 stereo checks also pass.
+
+Local bounded scene evidence:
+desktop-test-20261005-025551: mono, 180 seconds, no Critical log entries.
+desktop-test-20261005-030330: experimental VR frame path with headset disabled,
+180 seconds, no Critical entries, distinct eye views, first dialogue visible.
+Both use isolated Resume and synthetic tracking/pad input. These are not headset
+or Move-controller hardware tests and do not establish full-game compatibility.

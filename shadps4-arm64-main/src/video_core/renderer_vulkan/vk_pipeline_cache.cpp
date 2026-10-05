@@ -12,6 +12,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/fma_split_diag.h"
 #include "shader_recompiler/info.h"
+#include "shader_recompiler/resource_proofs.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -670,6 +671,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     auto patch = GetShaderPatch(info.pgm_hash, info.stage, perm_idx, "spv");
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
     if (is_patched) {
+        Shader::InvalidateResourceProofs(info);
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());
     } else {
@@ -695,44 +697,41 @@ PipelineCache::Result PipelineCache::GetProgram(Stage stage, LogicalStage l_stag
     if (new_program) {
         it_pgm.value() = std::make_unique<Program>(stage, l_stage, params);
         auto& program = it_pgm.value();
-        auto start = binding;
-        const auto module = CompileModule(program->info, runtime_info, params.code, 0, binding);
-        auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, start);
+        auto compiled_info = std::make_unique<Shader::Info>(stage, l_stage, params);
+        const auto start = binding;
+        const auto module = CompileModule(*compiled_info, runtime_info, params.code, 0, binding);
+        auto spec = Shader::StageSpecialization(*compiled_info, runtime_info, profile, start);
         const auto perm_hash = HashCombine(params.hash, 0);
-
-        RegisterShaderMeta(program->info, spec.fetch_shader_data, spec, perm_hash, 0);
-        program->AddPermut(module, std::move(spec));
-        return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
+        program->info = *compiled_info;
+        RegisterShaderMeta(*compiled_info, spec.fetch_shader_data, spec, perm_hash, 0);
+        program->AddPermut(module, std::move(spec), std::move(compiled_info));
+        const auto& selected = program->modules[0];
+        return std::make_tuple(selected.info.get(), module, selected.spec.fetch_shader_data,
                                perm_hash);
     }
 
     auto& program = it_pgm.value();
-    auto& info = program->info;
-    info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
-    info.user_data = params.user_data;
-    info.RefreshFlatBuf();
-    auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
-
-    size_t perm_idx = program->modules.size();
-    u64 perm_hash = HashCombine(params.hash, perm_idx);
-
-    vk::ShaderModule module{};
-
+    Shader::RefreshModuleDrawState(program->info, params);
+    auto spec = Shader::StageSpecialization(program->info, runtime_info, profile, binding);
     const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+    size_t perm_idx;
     if (it == program->modules.end()) {
-        auto new_info = Shader::Info(stage, l_stage, params);
-        module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
-
-        RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
-        program->AddPermut(module, std::move(spec));
+        perm_idx = program->modules.size();
+        auto compiled_info = std::make_unique<Shader::Info>(stage, l_stage, params);
+        const auto start = binding;
+        const auto module = CompileModule(*compiled_info, runtime_info, params.code, perm_idx, binding);
+        auto compiled_spec = Shader::StageSpecialization(*compiled_info, runtime_info, profile, start);
+        RegisterShaderMeta(*compiled_info, compiled_spec.fetch_shader_data, compiled_spec,
+                           HashCombine(params.hash, perm_idx), perm_idx);
+        program->AddPermut(module, std::move(compiled_spec), std::move(compiled_info));
     } else {
-        info.AddBindings(binding);
-        module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
-        perm_hash = HashCombine(params.hash, perm_idx);
+        Shader::RefreshModuleDrawState(*it->info, params);
+        it->info->AddBindings(binding);
     }
-    return std::make_tuple(&program->info, module,
-                           program->modules[perm_idx].spec.fetch_shader_data, perm_hash);
+    const auto& selected = program->modules[perm_idx];
+    return std::make_tuple(selected.info.get(), selected.module, selected.spec.fetch_shader_data,
+                           HashCombine(params.hash, perm_idx));
 }
 
 std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule module,
@@ -744,6 +743,7 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
                 const auto& d = instance.GetDevice();
                 d.destroyShaderModule(m.module);
                 m.module = CompileSPV(spv_code, d);
+                Shader::InvalidateResourceProofs(*m.info);
                 new_module = m.module;
             }
         }

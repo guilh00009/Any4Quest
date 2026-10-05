@@ -6,6 +6,7 @@
 #include "shader_recompiler/frontend/structured_control_flow.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/passes/buffer_usage.h"
+#include "shader_recompiler/ir/passes/resource_liveness.h"
 #include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
@@ -90,6 +91,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::DeadCodeEliminationPass(program);
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::CollectBufferUsage(info.buffers, program.blocks);
+    Shader::Optimization::CollectResourceLiveness(program);
     Shader::Optimization::CollectShaderInfoPass(program, profile);
 
     Shader::IR::DumpProgram(program, info);

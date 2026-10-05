@@ -84,7 +84,10 @@ def build_source(source: str) -> str:
     space_check += "\n    }\n"
     fixture = FIXTURE.read_text(encoding="utf-8")
     for marker, contents in {
+        "// @HOST_KEYS@": section(source, "    void PollDiagnosticKeys(", "    void CaptureMoveHost("),
+        "// @HOST_LIFECYCLE@": section(source, "    void DiagnosticEvent(", "    void PollDiagnosticKeys("),
         "// @HOST_MOVE_METHODS@": methods,
+        "// @HOST_CAPTURE@": section(source, "    void CaptureMoveHost(", "    // What Connect found."),
         "// @HOST_DISPATCH@": dispatch,
         "// @HOST_SPACE_CHANGE@": space_check,
     }.items():

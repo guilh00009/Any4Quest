@@ -40,6 +40,8 @@ struct BufferResource {
     bool used_as_readconst{};
     // Set after lowering and dead-code elimination; retain sharp for specialization.
     bool is_used{true};
+    u8 instance_input{255}; // No proven input dependency by default
+    u8 instance_mask{15}; // Union of all buffer accesses for four input residues
 
     bool IsSpecial() const noexcept {
         return buffer_type != BufferType::Guest;

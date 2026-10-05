@@ -17,6 +17,7 @@
 #include "core/vr/vr_move_input.h"
 #include "core/vr/vr_host_link.h"
 #include "core/vr/vr_runtime.h"
+#include "core/vr/move_capture.h"
 #ifdef ENABLE_OPENXR_HOST
 #include "core/vr/openxr_host.h"
 #endif
@@ -291,6 +292,7 @@ void Runtime::RecenterSeatLocked() {
     previous_seat_position = seat_position;
     previous_seat_yaw = seat_yaw;
     seat_changed = std::chrono::steady_clock::now();
+    if (Diagnostics::Capture::Enabled()) ++Diagnostics::seat_generation;
     seat_position = host_head.pose.position;
     seat_yaw = yaw;
     seat_valid = true;
@@ -315,6 +317,7 @@ void Runtime::RecenterSeat() {
 
 void Runtime::FixSeat() {
     std::scoped_lock lock{mutex};
+    if (Diagnostics::Capture::Enabled()) ++Diagnostics::seat_generation;
     seat_position = {};
     seat_yaw = {};
     seat_valid = true;
@@ -767,6 +770,60 @@ void Runtime::UpdateMove(u32 hand, const MoveHostState& host) {
         slot.history[(slot.history_start + slot.history_count) % slot.history.size()] = sample;
         ++slot.history_count;
     }
+    if (Diagnostics::Capture::Instance().Active()) {
+        const auto guest = MoveToTracker(sample);
+        Diagnostics::Record r{};
+        r.kind = 2; r.hand = hand;
+        r.flags = sample.connected | (sample.device.tracked << 1) |
+                  (host.linear_velocity_valid << 2) | (host.angular_velocity_valid << 3);
+        r.generation = guest.diagnostic_reference_generation;
+        r.receipt_us = process_now; r.returned_us = sample.timestamp_us;
+        r.sequence = sample.device.sequence; r.host_sequence = Diagnostics::host_sequence;
+        Diagnostics::PutPose(r, 0, host.device.pose);
+        Diagnostics::PutPose(r, 7, host_head.pose);
+        Diagnostics::PutPose(r, 14, guest.device.pose);
+        Diagnostics::PutVector(r, 21, guest.device.linear_velocity);
+        Diagnostics::PutVector(r, 24, guest.device.angular_velocity);
+        Diagnostics::PutVector(r, 27, sample.acceleration);
+        Diagnostics::PutVector(r, 30, sample.gyro);
+        Diagnostics::PutVector(r, 33, seat_position);
+        r.values[36] = seat_yaw.x; r.values[37] = seat_yaw.y;
+        r.values[38] = seat_yaw.z; r.values[39] = seat_yaw.w;
+        Diagnostics::PutVector(r, 40, config.origin_offset);
+        r.values[43] = static_cast<float>(age_us);
+        Diagnostics::Capture::Instance().Push(r);
+    }
+    // Opt-in diagnostics compare raw grip and guest tracker coordinates without
+    // changing offsets, smoothing or prediction. No pose logging by default.
+    static const bool diagnose = [] {
+        const char* value = std::getenv("SHADPS4_MOVE_DIAGNOSTICS");
+        return value && std::string_view{value} == "1";
+    }();
+    if (diagnose) {
+        static std::array<u64, 2> samples{}, tracked_samples{};
+        static std::array<std::chrono::steady_clock::time_point, 2> reported{};
+        ++samples[hand];
+        tracked_samples[hand] += tracked;
+        if (now - reported[hand] >= std::chrono::seconds{2} ||
+            sample.device.tracked != slot.latest.device.tracked) {
+            const auto guest = MoveToTracker(sample);
+            LOG_INFO(Core_Vr, "MOVE_DIAG hand={} connected={} tracked={} samples={}/{} age_us={} "
+                "grip=({:.3f},{:.3f},{:.3f}) head=({:.3f},{:.3f},{:.3f}) "
+                "guest=({:.3f},{:.3f},{:.3f}) velocity=({:.3f},{:.3f},{:.3f}) "
+                "grip_q=({:.3f},{:.3f},{:.3f},{:.3f}) guest_q=({:.3f},{:.3f},{:.3f},{:.3f}) buttons={:#x} trigger={}",
+                hand, sample.connected, tracked, tracked_samples[hand], samples[hand], age_us,
+                host.device.pose.position.x, host.device.pose.position.y, host.device.pose.position.z,
+                host_head.pose.position.x, host_head.pose.position.y, host_head.pose.position.z,
+                guest.device.pose.position.x, guest.device.pose.position.y, guest.device.pose.position.z,
+                guest.device.linear_velocity.x, guest.device.linear_velocity.y, guest.device.linear_velocity.z,
+                host.device.pose.orientation.x, host.device.pose.orientation.y,
+                host.device.pose.orientation.z, host.device.pose.orientation.w,
+                guest.device.pose.orientation.x, guest.device.pose.orientation.y,
+                guest.device.pose.orientation.z, guest.device.pose.orientation.w, sample.buttons, sample.trigger);
+            reported[hand] = now;
+            samples[hand] = tracked_samples[hand] = 0;
+        }
+    }
     slot.latest = sample;
     slot.source_time_ns = capture_ns;
     slot.received = now - std::chrono::nanoseconds{now_ns - capture_ns};
@@ -774,6 +831,7 @@ void Runtime::UpdateMove(u32 hand, const MoveHostState& host) {
 
 MoveState Runtime::MoveToTracker(const MoveState& state) const {
     MoveState result = state;
+    result.diagnostic_reference_generation = Diagnostics::seat_generation.load();
     if (result.device.tracked) {
         result.device.pose.position = PositionToTracker(state.device.pose.position);
         result.device.pose.orientation = Normalize(Multiply(Conjugate(seat_yaw), state.device.pose.orientation));

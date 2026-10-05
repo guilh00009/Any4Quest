@@ -81,6 +81,7 @@ struct MoveState {
     Vec3 acceleration; ///< Device-local specific force in g, derived from tracked motion.
     Vec3 gyro;         ///< Device-local angular velocity in radians/second.
     u64 timestamp_us{}; ///< sceKernelGetProcessTime domain; assigned once per sample.
+    u32 diagnostic_reference_generation{}; ///< Internal capture metadata, never part of a guest ABI.
     bool connected{};
 };
 

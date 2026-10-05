@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "video_core/renderer_vulkan/resource_liveness_routing.h"
 #include "common/debug.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -582,36 +583,26 @@ bool Rasterizer::BindResources(const Pipeline* pipeline,
     conditional_selector_snapshot = nullptr;
     conditional_material = 4;
     conditional_instance_mask = 0xf;
+    conditional_instance_exports = 0;
     if (!pipeline->IsCompute()) {
         const auto* vs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Vertex)];
         const auto* fs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Fragment)];
-        const auto& input = liverpool->regs.ps_inputs[3];
-        const auto& instance_input = liverpool->regs.ps_inputs[ConditionalBuffers::InstanceInput(fs ? fs->pgm_hash : 0)];
-        if (direct_instances && vs && fs &&
-            ConditionalBuffers::MatchesInstance(vs->pgm_hash, fs->pgm_hash,
-                instance_input.input_offset, instance_input.flat_shade) &&
-            vs->buffers.size() == 7 && fs->buffers.size() == 24 &&
-            fs->buffers[7].sharp_idx == ConditionalBuffers::InstanceSharp(fs->pgm_hash, 7) && fs->buffers[7].used_as_readconst &&
-            !fs->buffers[7].is_written && fs->buffers[8].sharp_idx == ConditionalBuffers::InstanceSharp(fs->pgm_hash, 8) &&
-            fs->buffers[8].used_as_readconst && !fs->buffers[8].is_written) {
-            conditional_instance_mask = ConditionalBuffers::InstanceMask(*direct_instances);
-            static std::array<bool, 2> logged{};
-            const unsigned profile_index = fs->pgm_hash == ConditionalBuffers::InstanceFragmentHash ? 0 : 1;
-            if (!logged[profile_index]) {
-                LOG_INFO(Render_Vulkan,
-                         "Verified instance resource profile: vs={:#x} fs={:#x} first={} count={} mask={:#x}",
-                         vs->pgm_hash, fs->pgm_hash, direct_instances->first,
-                         direct_instances->count, conditional_instance_mask);
-                logged[profile_index] = true;
-            }
+        const auto& stages = pipeline->GetStages();
+        const bool direct_routing = HasUnmodifiedVertexRouting(liverpool->regs.primitive_type,
+            stages[static_cast<u32>(Shader::LogicalStage::Geometry)] != nullptr,
+            stages[static_cast<u32>(Shader::LogicalStage::TessellationControl)] != nullptr,
+            stages[static_cast<u32>(Shader::LogicalStage::TessellationEval)] != nullptr);
+        if (direct_instances && vs && fs && vs->resource_proofs_valid &&
+            fs->resource_proofs_valid && direct_routing) {
+            conditional_instance_mask = Shader::Liveness::InstanceMask(*direct_instances);
+            conditional_instance_exports = vs->instance_export_mask;
         }
-        if (vs && fs && ConditionalBuffers::Matches(vs->pgm_hash, fs->pgm_hash,
-                                                    input.input_offset, input.flat_shade) &&
-            vs->buffers.size() == 10 && fs->buffers.size() == 24) {
+        if (vs && fs && vs->resource_proofs_valid && fs->resource_proofs_valid && direct_routing &&
+            ConditionalBuffers::HasUniformSelector(vs->pgm_hash, vs->buffers.size())) {
             const auto& selector = vs->buffers[0];
             const auto sharp = selector.GetSharp(*vs);
             const auto size = sharp.GetSize();
-            if (selector.sharp_idx == 88 && selector.used_as_readconst && !selector.is_written &&
+            if (selector.sharp_idx == ConditionalBuffers::SelectorSharp(vs->pgm_hash) && selector.used_as_readconst && !selector.is_written &&
                 size >= 12 && size <= 65536 && memory->IsValidMapping(sharp.base_address, size)) {
                 // Synchronize GPU writes, then bind the exact bytes used for the CPU predicate.
                 buffer_cache.ReadMemory(sharp.base_address, size);
@@ -620,6 +611,17 @@ bool Rasterizer::BindResources(const Pipeline* pipeline,
                 std::memcpy(words.data(), snapshot->mapped_data.data(), sizeof(words));
                 conditional_material = ConditionalBuffers::Material(words[0], words[2]);
                 conditional_selector_snapshot = snapshot.get();
+                // The verified vertex export is uniform across all instances. The
+                // fragment compiler unions every access, including later loops;
+                // only its proved flat-input branch mask can suppress a buffer.
+                conditional_instance_mask = 1u << conditional_material;
+                conditional_instance_exports = 1u << 5;
+                static bool selector_logged{};
+                if (!selector_logged && vs->pgm_hash == ConditionalBuffers::LaterVertexHash) {
+                    selector_logged = true;
+                    LOG_INFO(Render_Vulkan, "Uniform selector snapshot: VS={:#x}, material={}, buffer bytes={}",
+                             vs->pgm_hash, conditional_material, size);
+                }
                 isolated_readconst_buffers.push_back(std::move(snapshot));
             }
         }
@@ -828,11 +830,15 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     buffer_bindings.clear();
 
     for (const auto& desc : stage.buffers) {
-        const bool inactive = (conditional_selector_snapshot &&
-            ConditionalBuffers::IsInactive(stage.pgm_hash, buffer_bindings.size(),
-                                            desc.sharp_idx, conditional_material)) ||
-            ConditionalBuffers::IsInstanceInactive(stage.pgm_hash, buffer_bindings.size(),
-                                                    desc.sharp_idx, conditional_instance_mask);
+        bool instance_inactive = false;
+        if (stage.l_stage == Shader::LogicalStage::Fragment && desc.instance_input < 32 &&
+            !desc.IsSpecial() && !desc.is_written) {
+            const auto& input = liverpool->regs.ps_inputs[desc.instance_input];
+            instance_inactive = Shader::Liveness::Inactive(desc.instance_mask,
+                conditional_instance_mask, desc.instance_input, conditional_instance_exports,
+                input.input_offset, input.flat_shade);
+        }
+        const bool inactive = instance_inactive;
         const auto vsharp = desc.is_used && !inactive ? desc.GetSharp(stage) : AmdGpu::Buffer::Null();
         if (!desc.IsSpecial() && vsharp.base_address != 0 && vsharp.GetSize() > 0) {
             const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
@@ -851,8 +857,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
         const u32 alignment =
             is_storage ? instance.StorageMinAlignment() : instance.UniformMinAlignment();
         // Buffer is not from the cache, either a special buffer or unbound.
-        if (conditional_selector_snapshot && stage.pgm_hash == ConditionalBuffers::VertexHash &&
-            i == 0 && desc.sharp_idx == 88) {
+        if (conditional_selector_snapshot && stage.l_stage == Shader::LogicalStage::Vertex &&
+            i == 0 && desc.sharp_idx == ConditionalBuffers::SelectorSharp(stage.pgm_hash)) {
             buffer_infos.emplace_back(conditional_selector_snapshot->Handle(), 0, size);
             buffer_barriers.emplace_back(vk::BufferMemoryBarrier2{
                 .srcStageMask = vk::PipelineStageFlagBits2::eHost,

@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <cstring>
+#include <cstdlib>
+#include <string_view>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -12,6 +15,7 @@
 #include "common/logging/log.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/time.h"
+#include "core/vr/move_capture.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/move/move.h"
 #include "core/libraries/vr_tracker/vr_tracker.h"
@@ -397,6 +401,40 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
         result->connected = move.connected ? 1 : 0;
         result->timestamp = move.timestamp_us;
         result->device_timestamp = move.timestamp_us;
+        if (Core::Vr::Diagnostics::Capture::Instance().Active()) {
+            Core::Vr::Diagnostics::Record r{};
+            r.kind = 3; r.hand = *hand;
+            r.flags = move.connected | (move.device.tracked << 1);
+            r.generation = move.diagnostic_reference_generation;
+            r.receipt_us = Libraries::Kernel::sceKernelGetProcessTime();
+            r.sequence = move.device.sequence; r.requested_us = param->prediction_time;
+            r.returned_us = result->timestamp;
+            Core::Vr::Diagnostics::PutPose(r, 0, move.device.pose);
+            Core::Vr::Diagnostics::PutVector(r, 7, move.device.linear_velocity);
+            Core::Vr::Diagnostics::PutVector(r, 10, move.device.angular_velocity);
+            Core::Vr::Diagnostics::PutVector(r, 13, move.acceleration);
+            Core::Vr::Diagnostics::PutVector(r, 16, move.gyro);
+            r.values[19] = static_cast<float>(param->result_type);
+            r.values[20] = static_cast<float>(param->orientation_type);
+            r.values[21] = static_cast<float>(param->usage_type);
+            Core::Vr::Diagnostics::Capture::Instance().Push(r);
+        }
+        static const bool diagnose = [] {
+            const char* value = std::getenv("SHADPS4_MOVE_DIAGNOSTICS");
+            return value && std::string_view{value} == "1";
+        }();
+        if (diagnose) {
+            static std::array<u64, 2> calls{};
+            if (calls[*hand]++ % 120 == 0) {
+                const u64 now = Libraries::Kernel::sceKernelGetProcessTime();
+                LOG_INFO(Lib_VrTracker, "MOVE_TRACKER_DIAG hand={} sequence={} tracked={} age_us={} "
+                    "requested={} result_time={} result_type={} orientation_type={} usage_type={}",
+                    *hand, move.device.sequence, move.device.tracked,
+                    now >= move.timestamp_us ? now - move.timestamp_us : 0,
+                    param->prediction_time, result->timestamp, static_cast<u32>(param->result_type),
+                    static_cast<u32>(param->orientation_type), static_cast<u32>(param->usage_type));
+            }
+        }
         result->led_color = move_registration->color;
         result->status = ORBIS_VR_TRACKER_STATUS_NOT_TRACKING;
         // Connection and optical tracking are independent. Do not turn the last known

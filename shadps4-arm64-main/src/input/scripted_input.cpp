@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <numbers>
 #include <optional>
@@ -19,6 +20,7 @@
 #include "core/vr/vr_runtime.h"
 #include "input/controller.h"
 #include "input/scripted_input.h"
+#include "input/scripted_move_input.h"
 
 namespace Input {
 
@@ -31,6 +33,7 @@ std::atomic<float> microphone_level{0.0f};
 struct Step {
     double start;
     double end;
+    ScriptedMove::Step moves;
     Buttons buttons{Buttons::None};
     // Left x, left y, right x, right y; negative means "leave centred".
     std::array<int, 4> sticks{-1, -1, -1, -1};
@@ -104,6 +107,7 @@ std::vector<Step> ParseScript(const std::filesystem::path& script) {
         Step step{.start = start, .end = start + hold};
         std::string token;
         while (tokens >> token) {
+            if (ScriptedMove::Parse(token, step.moves, ParsePose)) continue;
             if (const auto it = ButtonNames.find(token); it != ButtonNames.end()) {
                 step.buttons |= it->second;
                 continue;
@@ -164,7 +168,7 @@ std::vector<Step> ParseScript(const std::filesystem::path& script) {
     return steps;
 }
 
-void Replay(std::vector<Step> steps) {
+void Replay(std::vector<Step> steps, std::filesystem::path script) {
     Common::SetCurrentThreadName("shadPS4:ScriptedInput");
     const auto begin = std::chrono::steady_clock::now();
     double last_end = 0.0;
@@ -176,6 +180,16 @@ void Replay(std::vector<Step> steps) {
     Core::Vr::Runtime::Instance().FixSeat();
     std::vector<bool> started(steps.size());
 
+    const bool script_moves = ScriptedMove::Allowed(std::getenv("SHADPS4_SCRIPT_MOVES"),
+                                                   std::getenv("SHADPS4_OPENXR"));
+    if (script_moves) LOG_INFO(Input, "Headset-disabled synthetic Move test enabled");
+    // Test-only live reload: each atomically replaced file is a fresh relative-time batch.
+    // The controller driver supplies persistent poses in every batch. Never enabled in VR.
+    const bool live = script_moves && ScriptedMove::Allowed(
+        std::getenv("SHADPS4_SCRIPT_LIVE"), std::getenv("SHADPS4_OPENXR"));
+    std::error_code stamp_error;
+    auto last_write = std::filesystem::last_write_time(script, stamp_error);
+    double next_reload = 0.25;
     Buttons previous_buttons{Buttons::None};
     std::array<int, 6> previous_axes{128, 128, 128, 128, 0, 0};
     std::optional<std::array<float, 2>> previous_touch;
@@ -183,15 +197,40 @@ void Replay(std::vector<Step> steps) {
         const double now =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
 
+        if (live && now >= next_reload) {
+            next_reload = now + 0.25;
+            const auto stamp = std::filesystem::last_write_time(script, stamp_error);
+            if (!stamp_error && stamp != last_write) {
+                last_write = stamp;
+                try {
+                    auto replacement = ParseScript(script);
+                    if (!replacement.empty()) {
+                        for (auto& step : replacement) { step.start += now; step.end += now; }
+                        steps = std::move(replacement);
+                        started.assign(steps.size(), false);
+                        LOG_INFO(Input, "Live test input batch: {} steps at {:.3f}s", steps.size(), now);
+                    }
+                } catch (const std::exception& error) {
+                    LOG_WARNING(Input, "Ignored invalid live test input: {}", error.what());
+                }
+            }
+        }
         Buttons buttons{Buttons::None};
         std::array<int, 6> axes{128, 128, 128, 128, 0, 0};
         const Step* head_step = nullptr;
         const Step* pad_step = nullptr;
         const Step* hands_step = nullptr;
+        std::array<const Step*, 2> move_steps{};
+        std::array<Core::Vr::MoveInput::TouchButtons, 2> move_touch{};
+        std::array<float, 2> move_trigger{};
         std::optional<std::array<float, 2>> touch;
         float microphone = 0.0f;
         for (const Step& step : steps) {
             if (now >= step.start) {
+                for (unsigned hand=0;hand<2;++hand) {
+                    if (step.moves.poses[hand] && (!move_steps[hand] || step.start >= move_steps[hand]->start))
+                        move_steps[hand] = &step;
+                }
                 // Poses persist, the most recently started line wins.
                 if (step.head && (head_step == nullptr || step.start >= head_step->start)) {
                     head_step = &step;
@@ -210,6 +249,11 @@ void Replay(std::vector<Step> steps) {
             }
             if (step.touch) {
                 touch = step.touch;
+            }
+            for (unsigned hand=0;hand<2;++hand) {
+                move_touch[hand].squeeze=std::max(move_touch[hand].squeeze,step.moves.touch[hand].squeeze);
+                move_touch[hand].primary |= step.moves.touch[hand].primary;
+                move_trigger[hand]=std::max(move_trigger[hand],step.moves.trigger[hand]);
             }
             microphone = std::max(microphone, step.microphone);
             buttons |= step.buttons;
@@ -258,6 +302,18 @@ void Replay(std::vector<Step> steps) {
             }
         }
 
+        if (script_moves) {
+            for (unsigned hand=0;hand<2;++hand) {
+                if (!move_steps[hand]) continue;
+                Core::Vr::MoveHostState sample{};
+                sample.connected = sample.device.tracked = true;
+                sample.device.pose = *move_steps[hand]->moves.poses[hand];
+                sample.buttons = Core::Vr::MoveInput::MapTouchButtons(move_touch[hand]);
+                sample.trigger = move_trigger[hand];
+                vr.UpdateMove(hand, sample);
+            }
+        }
+
         // The analog triggers follow their digital buttons.
         axes[4] = True(buttons & Buttons::L2) ? 255 : 0;
         axes[5] = True(buttons & Buttons::R2) ? 255 : 0;
@@ -271,12 +327,13 @@ void Replay(std::vector<Step> steps) {
             previous_axes = axes;
             previous_touch = touch;
         }
-        if (now > last_end + 1.0) {
+        if (!live && now > last_end + 1.0) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     microphone_level.store(0.0f, std::memory_order_relaxed);
+    if (script_moves) Core::Vr::Runtime::Instance().ReleaseMoves();
     LOG_INFO(Input, "Scripted input finished");
 }
 
@@ -293,7 +350,7 @@ void StartScriptedInput(const std::filesystem::path& script) {
         return;
     }
     LOG_INFO(Input, "Replaying {} input steps from {}", steps.size(), script.string());
-    std::thread{Replay, std::move(steps)}.detach();
+    std::thread{Replay, std::move(steps), script}.detach();
 }
 
 } // namespace Input

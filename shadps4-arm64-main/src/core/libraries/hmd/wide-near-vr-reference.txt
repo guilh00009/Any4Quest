@@ -1,0 +1,28 @@
+Experimental WideNear VR export, 2026-10-05
+
+Opt in explicitly with SHADPS4_EXPERIMENTAL_WIDE_NEAR_VR=1. Existing mono/stereo
+desktop modes remain available. No runtime installation or registry change.
+
+The verified shared 1920x1080 atlas and flags=5 restrictions remain. Each eye's
+wide and near source UV maps are kept distinct in every render target, including
+the existing OpenXR local/export buffers. Reconstruct a symmetric intersection
+of the supplied full-view frusta, then report that exact common FOV through the
+existing mirrored-FOV transport. This slightly crops the asymmetric edges and
+does not claim arbitrary asymmetric transport support. Invalid maps/pose reject.
+
+The WideNear caller at CUSA08291 01.00 eboot+0x372da passes the same tracker buffer
+as the non-overlay call at +0x3738b. Stores +0x37256..0x37288 establish position at
+0, orientation at 0xc, timestamps at 0x20/0x28 and frame number at 0x30. The copied
+finite/nonzero pose goes through the existing tracker-to-host conversion before
+OpenXR delivery. Guest completion-label addresses are never written by this path.
+
+Nine projection/pose checks cover 10,573 coordinate samples, exact agreement of
+reported FOV and reconstructed pixels, containment in both input frusta, and
+rejection of invalid scales, offsets, NaN, infinite position and zero quaternion.
+Existing 20,736 per-eye sampling checks retain the duplicate-left regression.
+
+Remaining limits: linear radial blending is an approximation; visible overlay
+composition and exact PSVR completion/timing semantics remain unimplemented.
+Initial 2D logos are still desktop-only. Actual OpenXR swapchain delivery, worn-
+headset pose alignment, stereo comfort, tracking and Move input require hardware
+testing. The desktop fallback passed; that is not proof of headset correctness.

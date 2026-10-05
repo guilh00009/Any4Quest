@@ -1,0 +1,53 @@
+Later Inpatient scene crash / controller investigation, 2026-10-05
+
+User session: reviewed binary 0b45681799ed23c05c2aa321460a25d6848ae0701fa6e148e559f3db067e2bf0
+ran about 30 minutes in actual VR before ClampRangeSize asserted at address 0x600.
+Local preserved evidence: vr-session-evidence-20261005-104719 (workspace only).
+Headset-disabled Resume on copied checkpoint reproduced at about 100 seconds.
+
+Proven fault: VS 588c15fbe6a11aac, FS a367d0e1bbe3840d; direct draw first=0,
+count=7; fragment binding6, sharp108, base0x600, size0xe9100000. FS compiler
+metadata: input3, mask8; input3 is flat VS Param5. VS exports no InstanceId proof.
+This selector is uniform, so using instance residues would be incorrect.
+
+Captured VS IR: ReadConstBuffer buffer0 word0 is enable; when nonzero, word2
+is selected, otherwise zero. Param5.x is bitcast(selected | (enable << 31)).
+Exactly one Param5.x write. Variant buffer count=8, selector sharp36, size144.
+The earlier verified VS 37b889e3eb0d588f uses count10 and sharp88.
+
+Repair: recognize these exact vertex layouts; validate descriptor/read-only
+uniform data; synchronize and snapshot the entire selector buffer, then bind
+that same snapshot for the vertex shader. Its material low bits feed the existing
+compiler-proved fragment access masks via flat Param5 routing. All accesses,
+including loops, are unioned. Fragment hash/binding-number suppression is no
+longer used by the binder. Unknown shaders/layouts, indirect unknown instance
+selectors, modified SPIR-V, and auxiliary geometry/tessellation keep conservative
+validation. This is a bounded uniform-profile extension, not arbitrary uniform
+shader execution. ClampRangeSize/assertions are unchanged.
+
+Controller trace: PC uses /input/grip/pose (not aim), local_space and identical
+pose_time for head/hands, then the same seated yaw/origin conversion in metres.
+No spring/smoothing applies to Move poses. Stale host samples expire at 250ms;
+tracking and connection are separate. Host poses are predicted at display time
+plus the existing 20ms setting; no unverified timing/offset changes were made.
+Prior logs lack hand coordinates and per-hand tracking quality, so hardware
+cause remains unresolved. Added opt-in SHADPS4_MOVE_DIAGNOSTICS=1 logs compare
+raw grip/head and guest poses, quaternions, velocities, tracking ratios, sample
+age and guest prediction requests. Default source behavior is unchanged.
+
+Tests: 811 uniform/routing checks; existing PC host source-extraction suite;
+real runtime + Move + VrTracker Windows integration with 480 trajectory samples.
+All pass. Physical-controller droop still requires an instrumented hardware retest.
+
+Locomotion follow-up: the old input script drove only pad/head, so its six-minute
+run only demonstrated the crash transition and stationary corridor rendering.
+Added move0=/move1= poses and moveN_grip/trigger/primary test tokens, feeding
+MapTouchButtons and Runtime::UpdateMove. Requires SHADPS4_SCRIPT_MOVES=1 and
+SHADPS4_OPENXR=0. Normal VR launchers clear the script/Move-test flags.
+Four-minute exact-binary test visually verified forward walking, right-pose/
+grip turning and walking into the corridor wall with fixed head pose. No claim
+of full scene completion. Controls reference:
+https://www.pushsquare.com/news/2018/01/the_inpatients_controls_explained_with_dualshock_4_and_ps_move
+Local inputs: inpatient-move-walk-input.txt; evidence desktop-test-20261005-111754.
+Guest requests observed about 50ms ahead of sample timestamps; this identifies
+a timing question, not proof of the user's physical controller symptom.

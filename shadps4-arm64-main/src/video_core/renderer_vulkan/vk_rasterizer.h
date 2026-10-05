@@ -164,6 +164,7 @@ private:
     std::vector<std::unique_ptr<VideoCore::Buffer>> isolated_readconst_buffers;
     u32 isolated_readconst_hits{};
     VideoCore::Buffer* conditional_selector_snapshot{};
+    u32 conditional_instance_exports{};
     u32 conditional_instance_mask = 0xf; // all branches active unless proven otherwise
     u32 conditional_material = 4; // unknown: preserve normal validation
 

@@ -897,7 +897,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     eye_width = left_info.size.width;
     eye_height = left_info.size.height;
     if (preview_band[2] != 0) eye_width /= 2;
-    const bool desktop_stereo = screen_2d && preview_band[2] != 0 && preview_band[3] != 0;
+    const bool composed_stereo = preview_band[2] != 0 && preview_band[3] != 0;
 
     // With a VR host attached the frame goes into one of its buffers instead of the window. A
     // headset of the machine's own gets a frame of its own next to the window's: the eyes'
@@ -906,7 +906,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     const bool exported = frame != nullptr;
     Frame* const local = (exported || screen_2d) ? nullptr : vr_exporter->AcquireLocal(eye_width * 2, eye_height);
     if (!exported) {
-        expected_ratio = static_cast<float>(eye_width * ((screen_2d && !desktop_stereo) ? 1 : 2)) / static_cast<float>(eye_height);
+        expected_ratio = static_cast<float>(eye_width * ((screen_2d && !composed_stereo) ? 1 : 2)) / static_cast<float>(eye_height);
         frame = GetRenderFrame();
         if (!frame && !local) {
             return {};
@@ -955,7 +955,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     }
     // Left eye on the left half, right eye on the right half.
     const auto regions_for = [&](const Frame& target, HostPasses::PostProcessingPass::Settings base) {
-        const u32 count = (screen_2d && !desktop_stereo) ? 1 : 2;
+        const u32 count = (screen_2d && !composed_stereo) ? 1 : 2;
         const u32 half_width = target.width / count;
         boost::container::static_vector<HostPasses::PostProcessingPass::Region, 2> regions;
         for (u32 eye = 0; eye < count; ++eye) {
@@ -966,7 +966,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
                     .extent{.width = half_width, .height = target.height},
                 },
             });
-            if (desktop_stereo) {
+            if (composed_stereo) {
                 const Libraries::Hmd::Preview::EyeMaps left{screen_uv, preview_near_uv, preview_view_uv};
                 const auto maps = Libraries::Hmd::Preview::SelectEyeMaps(eye, left, preview_right_uv);
                 base.uv_transform = maps[0];
@@ -987,7 +987,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
     }();
     auto hmd_settings = pp_settings;
     hmd_settings.sharpen = sharpen;
-    if (screen_2d) hmd_settings.uv_transform = screen_uv;
+    if (screen_2d || preview_band[2] != 0) hmd_settings.uv_transform = screen_uv;
     hmd_settings.preview_near_uv = preview_near_uv;
     hmd_settings.preview_view_uv = preview_view_uv;
     hmd_settings.preview_band = preview_band;
@@ -1008,7 +1008,7 @@ HmdFrames Presenter::PrepareHmdFrame(std::span<const AmdGpu::Image, 2> eye_textu
         hmd_pp_pass.Render(cmdbuf, regions_for(*local, local_settings), *local, local_settings);
         DebugState.output_resolution = {local->width, local->height};
     }
-    DebugState.game_resolution = {eye_width * ((screen_2d && !desktop_stereo) ? 1 : 2), eye_height};
+    DebugState.game_resolution = {eye_width * ((screen_2d && !composed_stereo) ? 1 : 2), eye_height};
 
     // Flush frame creation commands.
     for (Frame* target : {frame, local}) {

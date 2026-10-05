@@ -15,7 +15,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 2u;
-static constexpr u32 ShaderMetaVersion = 3u; // BufferResource::is_used after optimization
+static constexpr u32 ShaderMetaVersion = 5u; // Per-module resource proofs and SPIR-V trust
 static constexpr u32 PipelineKeyVersion = 2u;
 } // namespace Serialization
 
@@ -251,48 +251,41 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 }
 
 bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) {
-    auto program = std::make_unique<Program>();
+    auto compiled_info = std::make_unique<Shader::Info>();
     Shader::StageSpecialization spec{};
-    spec.info = &program->info;
+    spec.info = compiled_info.get();
     size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, fetch_shader, spec, perm_idx)) {
+    if (!LoadShaderMeta(ar, *compiled_info, fetch_shader, spec, perm_idx)) {
         return false;
     }
-
     std::vector<u32> spv{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
-                                       spv);
+                                       fmt::format("{:#018x}_{}", compiled_info->pgm_hash, perm_idx), spv);
     if (spv.empty()) {
         return false;
     }
 
-    // Permutation hash depends on shader variation index. To prevent collisions, we need insert it
-    // at the exact position rather than append
-
-    vk::ShaderModule module{};
-
-    auto [it_pgm, new_program] = program_cache.try_emplace(program->info.pgm_hash);
+    auto [it_pgm, new_program] = program_cache.try_emplace(compiled_info->pgm_hash);
     if (new_program) {
-        module = CompileSPV(spv, instance.GetDevice());
-        it_pgm.value() = std::move(program);
-    } else {
-        const auto& it = std::ranges::find(it_pgm.value()->modules, spec, &Program::Module::spec);
-        if (it != it_pgm.value()->modules.end()) {
-            // If the permutation is already preloaded, make sure it has the same permutation index
-            const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
-            ASSERT_MSG(perm_idx == idx, "Permutation {} is already inserted at {}! ({}_{:x})",
-                       perm_idx, idx, program->info.stage, program->info.pgm_hash);
-            module = it->module;
-        } else {
-            module = CompileSPV(spv, instance.GetDevice());
-        }
+        it_pgm.value() = std::make_unique<Program>();
+        it_pgm.value()->info = *compiled_info;
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
-
-    infos[stage] = &it_pgm.value()->info;
-    modules[stage] = module;
-
+    auto& program = *it_pgm.value();
+    // Repeated stage references must reuse both module and metadata ownership.
+    const auto it = std::ranges::find(program.modules, spec, &Program::Module::spec);
+    if (it != program.modules.end()) {
+        const auto idx = std::distance(program.modules.begin(), it);
+        ASSERT_MSG(perm_idx == idx, "Permutation {} is already inserted at {}! ({}_{:x})",
+                   perm_idx, idx, compiled_info->stage, compiled_info->pgm_hash);
+    } else {
+        if (perm_idx < program.modules.size() && program.modules[perm_idx].info) {
+            return false; // Conflicting cache entry; retain existing pipeline pointers.
+        }
+        const auto module = CompileSPV(spv, instance.GetDevice());
+        program.InsertPermut(module, std::move(spec), perm_idx, std::move(compiled_info));
+    }
+    infos[stage] = program.modules[perm_idx].info.get();
+    modules[stage] = program.modules[perm_idx].module;
     return true;
 }
 

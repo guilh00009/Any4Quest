@@ -12,17 +12,29 @@
 #include <limits>
 #include <map>
 #include <vector>
+#include <filesystem>
+#include <sstream>
+#include <cstdio>
+#include <cstring>
 
 #include <openxr/openxr.h>
 
 #include "core/vr/vr_move_input.h"
 #include "core/vr/vr_runtime.h"
+#include "core/vr/move_capture.h"
 
 #ifdef NDEBUG
 #error "This fixture requires enabled assertions"
 #endif
 
 using namespace Core::Vr;
+namespace Libraries::Kernel { inline u64 sceKernelGetProcessTime() { return 12345; } }
+constexpr int VK_CONTROL=17, VK_SHIFT=16, VK_F8=119;
+static std::array<bool,256> capture_keys{};
+static short GetAsyncKeyState(int key) { return capture_keys[key] ? short(0x8000) : 0; }
+namespace fmt { template<class T> std::string format(const char*, T stamp) {
+    return "user/log/move-capture-"+std::to_string(stamp)+".csv";
+} }
 // Deterministic time avoids haptic refresh tests depending on scheduler delays.
 struct Clock {
     using time_point = std::chrono::steady_clock::time_point;
@@ -144,9 +156,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(
     // Runtime, not the host, owns normalization and coordinate transforms.
     location->pose.orientation = {0.0f, 0.0f, 0.0f, 2.0f};
     auto* velocity = static_cast<XrSpaceVelocity*>(location->next);
+    if (velocity) {
     velocity->velocityFlags = xr.velocity_flags[hand];
     velocity->linearVelocity = {4.0f, 5.0f, 6.0f};
     velocity->angularVelocity = {7.0f, 8.0f, 9.0f};
+    }
     return xr.locate_result[hand];
 }
 
@@ -173,6 +187,26 @@ XRAPI_ATTR XrResult XRAPI_CALL xrSyncActions(XrSession, const XrActionsSyncInfo*
 }
 
 struct Host {
+    XrSpace diagnostic_aim_spaces[2]{reinterpret_cast<XrSpace>(30), reinterpret_cast<XrSpace>(31)};
+    XrTime diagnostic_display_time{100000};
+    long long diagnostic_pose_process_us{15000};
+    u64 diagnostic_clock_interval_us{2};
+    XrSpaceLocationFlags diagnostic_head_flags{ValidPose | TrackedPose};
+    XrPosef head_pose{};
+    float predict_ms{20};
+    // @HOST_CAPTURE@
+    unsigned diagnostic_session_generation{}, diagnostic_events{}, diagnostic_markers{};
+    bool diagnostic_keys[3]{};
+    bool diagnostic_was_active{}, diagnostic_report_pending{};
+    // @HOST_KEYS@
+    std::array<std::array<char,512>,128> diagnostic_recovery_ring{};
+    size_t diagnostic_recovery_count{};
+    XrSessionState state{XR_SESSION_STATE_FOCUSED};
+    XrInstance instance{FakeHandle<XrInstance>(1)};
+    XrSystemId system{1};
+    bool session_lost{}, instance_lost{};
+    // @HOST_LIFECYCLE@
+
     bool actions_ready{true};
     bool session_running{true};
     bool actions_synced{};
@@ -394,7 +428,81 @@ void TestReferenceSpaceBoundary() {
     std::cout << "PASS reference-space release exactly at boundary; legacy recenter preserved\n";
 }
 
+void TestCapture() {
+    Reset(); Host host;
+    auto& capture = Diagnostics::Capture::Instance();
+    const auto path = std::filesystem::temp_directory_path() /
+        ("any4quest-host-capture-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".csv");
+    assert(capture.Start(path.string()));
+    host.UpdateMoves(123456);
+    capture.Stop(); capture.Wait(); assert(capture.WriteSucceeded());
+    std::ifstream in(path); std::string line;
+    std::getline(in,line); std::getline(in,line);
+    for (int hand=0;hand<2;++hand) {
+        assert(bool(std::getline(in,line))); std::stringstream stream(line);
+        std::vector<double> fields;std::string field;
+        while(std::getline(stream,field,',')) fields.push_back(std::stod(field));
+        assert(fields.size()==60 && fields[0]==1 && fields[1]==hand);
+        assert(fields[4]==12345 && fields[9]==123456 && fields[10]==100000 && fields[11]==15000);
+        assert(fields[12]==hand+1 && fields[19]==hand+1); // raw grip and comparison aim
+        assert(fields[12+21]==4 && fields[12+24]==7); // actual raw velocities
+    }
+    assert(!std::getline(in,line)); in.close();std::filesystem::remove(path);
+    std::cout << "PASS production capture: raw grip/aim, timing, velocities, two-hand routing\n";
+}
+void TestLifecycleCapture() {
+    const auto old = std::filesystem::current_path();
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("any4quest-lifecycle-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir/"user/log");
+    std::filesystem::current_path(dir);
+    Host host;host.DiagnosticEvent("old-entry");
+    for(int i=0;i<200;++i)host.DiagnosticEvent("later-event");
+    host.session_lost=true;host.system=0;
+    host.DiagnosticEvent("xrGetSystem.begin");
+    assert(host.diagnostic_events==128);
+    std::ifstream in("user/log/move-recovery.txt");std::string line;int count=0;
+    while(std::getline(in,line)){++count;assert(line.find("old-entry")==std::string::npos);}
+    assert(count==128);in.clear();in.seekg(0);
+    std::string text((std::istreambuf_iterator<char>(in)),{});
+    assert(text.find("reason=xrGetSystem.begin")!=std::string::npos);
+    assert(text.find("system=0")!=std::string::npos && text.find("lost=1")!=std::string::npos);
+    in.close();std::filesystem::current_path(old);std::filesystem::remove_all(dir);
+    std::cout << "PASS production lifecycle ring: last128 survive ordinary-log exhaustion and persist before discovery\n";
+}
+void TestCaptureKeys() {
+    const auto old = std::filesystem::current_path();
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("any4quest-keys-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir/"user/log");std::filesystem::current_path(dir);
+    Host host;auto& capture=Diagnostics::Capture::Instance();
+    capture_keys={};capture_keys[VK_F8]=true;host.PollDiagnosticKeys();assert(!capture.Active());
+    capture_keys[VK_CONTROL]=capture_keys[VK_SHIFT]=true;host.PollDiagnosticKeys();assert(capture.Active());
+    host.PollDiagnosticKeys(); // held start cannot restart
+    capture_keys[VK_F8]=false;capture_keys[VK_F8+1]=true;
+    host.PollDiagnosticKeys();host.PollDiagnosticKeys();assert(host.diagnostic_markers==1);
+    capture_keys[VK_F8+1]=false;host.PollDiagnosticKeys();capture_keys[VK_F8+1]=true;
+    host.PollDiagnosticKeys();assert(host.diagnostic_markers==2);
+    capture_keys[VK_F8+1]=false;capture_keys[VK_F8+2]=true;host.PollDiagnosticKeys();
+    assert(!capture.Active());capture.Wait();assert(capture.WriteSucceeded());host.PollDiagnosticKeys();
+    int files=0,rows=0;
+    for(const auto& entry:std::filesystem::directory_iterator("user/log")) {
+        ++files;std::ifstream in(entry.path());std::string line;
+        while(std::getline(in,line)) if(line.starts_with("4,"))++rows;
+    }
+    assert(files==1 && rows==2);capture_keys={};std::filesystem::current_path(old);
+    std::filesystem::remove_all(dir);
+    std::cout << "PASS production hotkeys: modifiers required, held-key debounce, numbered markers, stop/save\n";
+}
 int main() {
+#ifdef _WIN32
+    _putenv_s("SHADPS4_MOVE_CAPTURE","1");
+#else
+    setenv("SHADPS4_MOVE_CAPTURE","1",1);
+#endif
+    TestCaptureKeys();
+    TestLifecycleCapture();
+    TestCapture();
     TestHandRouting();
     TestPoseAvailability();
     TestInputSanitization();
