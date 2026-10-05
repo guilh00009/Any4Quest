@@ -31,7 +31,8 @@ cp "$apk" "$out/$name-Quest3.apk"
 
 cp "$root/build/win-x64/shadps4.exe" "$pc/pc-vr/"
 cp "$root/pc-vr/launch.ps1" "$pc/pc-vr/"
-cp "$root/Play Astro Bot VR.bat" "$pc/"
+cp "$root/Play Astro Bot VR.bat" "$root/Play Any4Quest VR.bat" "$pc/"
+cp "$root/README-ANY4QUEST.md" "$pc/"
 cp "$root/pc-vr/user/input_config/default.ini" "$root/pc-vr/user/input_config/global.ini" \
    "$pc/pc-vr/user/input_config/"
 # What the launcher unpacks a game package with.

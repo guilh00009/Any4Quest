@@ -102,6 +102,7 @@ echo "== native"
   -I "$(cygpath -m "$root/shadps4-arm64-main/src/core/vr")" \
   "$(cygpath -m "$host/cpp/main.cpp")" "$(cygpath -m "$host/cpp/core_process.cpp")" \
   "$(cygpath -m "$host/cpp/xr_host.cpp")" "$(cygpath -m "$host/cpp/gl_frames.cpp")" \
+  "$(cygpath -m "$host/cpp/move_controllers.cpp")" \
   "$(cygpath -m "$host/cpp/self_test.cpp")" "$(cygpath -m "$host/cpp/log.cpp")" \
   "$(cygpath -m "$host/cpp/xr_probe.cpp")" \
   -shared -static-libstdc++ -Wl,--no-undefined -Wl,-soname,libastrovr.so \
@@ -114,6 +115,7 @@ echo "== java"
 javac -Xlint:-options -source 11 -target 11 -classpath "$(cygpath -m "$PLATFORM_JAR")" \
   -d "$(cygpath -m "$out/classes")" \
   "$(cygpath -m "$host/java/com/astrobotquest/vrhost/MainActivity.java")" \
+  "$(cygpath -m "$host/java/com/astrobotquest/vrhost/GameSelection.java")" \
   "$(cygpath -m "$host/java/com/astrobotquest/vrhost/SandboxShell.java")" \
   "$(cygpath -m "$host/java/com/astrobotquest/vrhost/RuntimeInstaller.java")"
 # d8 is a batch file around a jar; call the jar so paths with spaces survive.

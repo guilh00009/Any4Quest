@@ -65,7 +65,7 @@ extern "C" {
 JNIEXPORT void JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeStartXr(
     JNIEnv* env, jobject activity, jfloat refresh_rate, jint eye_width, jint eye_height,
     jboolean track_hands, jint sharpen, jboolean cubic, jboolean show_stats, jfloat predict_ms,
-    jint dynamic_resolution, jboolean cpu_boost) {
+    jint dynamic_resolution, jboolean cpu_boost, jboolean move_input, jboolean move_rumble) {
     if (g_app) {
         return;
     }
@@ -78,6 +78,8 @@ JNIEXPORT void JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeStartXr(
     options.eye_width = static_cast<uint32_t>(eye_width);
     options.eye_height = static_cast<uint32_t>(eye_height);
     options.track_hands = track_hands == JNI_TRUE;
+    options.move_input = move_input == JNI_TRUE;
+    options.move_rumble = move_rumble == JNI_TRUE;
     options.sharpen = sharpen;
     options.cubic = cubic == JNI_TRUE;
     options.show_stats = show_stats == JNI_TRUE;
@@ -262,6 +264,7 @@ JNIEXPORT jint JNICALL Java_com_astrobotquest_vrhost_MainActivity_nativeXrStatus
     const int refresh_rate =
         std::clamp(static_cast<int>(g_app->xr_status.refresh_rate.load() + 0.5f), 0, 255);
     return (g_app->xr_status.session_running ? 1 : 0) | (g_app->xr_status.hands_tracked ? 2 : 0) |
+           ((g_app->xr_status.move_tracked_mask.load() & 3) << 2) |
            (refresh_rate << 8);
 }
 

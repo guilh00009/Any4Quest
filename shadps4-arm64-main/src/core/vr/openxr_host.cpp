@@ -26,6 +26,7 @@
 #include "common/singleton.h"
 #include "common/thread.h"
 #include "core/vr/openxr_host.h"
+#include "core/vr/vr_move_input.h"
 #include "input/controller.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -389,6 +390,11 @@ struct OpenXrHost::Impl {
     std::atomic<u32> rumble_wanted{};
     u32 rumble_applied{};
     Clock::time_point rumble_time;
+    // Separate devices, buttons and motors in Move mode; the SDL gamepad is independent.
+    std::array<bool, 2> moves_connected{};
+    std::array<bool, 2> moves_tracked{};
+    std::array<u8, 2> move_rumble_applied{};
+    std::array<Clock::time_point, 2> move_rumble_time{};
 
     // The controller, as far as hands around it give it away.
     bool pad_seen{};
@@ -718,7 +724,7 @@ struct OpenXrHost::Impl {
         if (has_hand_tracking) {
             CreateHandTrackers();
         }
-        if (use_controllers || use_grips) {
+        if (use_controllers || use_grips || Runtime::Instance().IsMoveEnabled()) {
             CreateActions();
         }
         if (has_refresh_rate) {
@@ -775,8 +781,11 @@ struct OpenXrHost::Impl {
     void CreateActions() {
         actions_ready = false;
         XrActionSetCreateInfo set_info{XR_TYPE_ACTION_SET_CREATE_INFO};
-        std::strcpy(set_info.actionSetName, "gamepad");
-        std::strcpy(set_info.localizedActionSetName, "Gamepad");
+        const bool move_mode = Runtime::Instance().IsMoveEnabled();
+        std::strcpy(set_info.actionSetName, move_mode ? "ps_move" : "gamepad");
+        std::strcpy(set_info.localizedActionSetName, move_mode ? "PS Move" : "Gamepad");
+        LOG_INFO(Core_Vr, "OpenXR controller mode: {}",
+                 move_mode ? "two independent PS Move controllers" : "gamepad");
         if (XR_FAILED(xrCreateActionSet(instance, &set_info, &action_set))) {
             action_set = XR_NULL_HANDLE;
             return;
@@ -815,7 +824,7 @@ struct OpenXrHost::Impl {
         made = made &&
                make(act_rumble, "rumble", "Rumble", XR_ACTION_TYPE_VIBRATION_OUTPUT, true);
         if (!made) {
-            LOG_WARNING(Core_Vr, "The headset's controllers could not be set up as a gamepad");
+            LOG_WARNING(Core_Vr, "The headset's controller actions could not be set up");
             return;
         }
 
@@ -847,6 +856,8 @@ struct OpenXrHost::Impl {
         bind(act_rumble, "/user/hand/right/output/haptic");
         XrInteractionProfileSuggestedBinding suggested{
             XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        // The core Oculus Touch profile is also the compatibility profile for Quest Touch
+        // controllers. Do not suggest extension profiles without first enabling them.
         xrStringToPath(instance, "/interaction_profiles/oculus/touch_controller",
                        &suggested.interactionProfile);
         suggested.countSuggestedBindings = static_cast<uint32_t>(bindings.size());
@@ -872,14 +883,20 @@ struct OpenXrHost::Impl {
         space_info.poseInActionSpace.orientation.w = 1.0f;
         if (XR_FAILED(xrCreateActionSpace(session, &space_info, &controller_space))) {
             controller_space = XR_NULL_HANDLE;
-            LOG_WARNING(Core_Vr, "The headset's controllers cannot be located");
-            return;
+            LOG_WARNING(Core_Vr, "The headset's gamepad aim pose cannot be located");
+            if (!move_mode) {
+                return;
+            }
         }
         for (int hand = 0; hand < 2; ++hand) {
             space_info.action = act_grip;
             space_info.subactionPath = hand_paths[hand];
             if (XR_FAILED(xrCreateActionSpace(session, &space_info, &grip_spaces[hand]))) {
                 grip_spaces[hand] = XR_NULL_HANDLE;
+                if (move_mode) {
+                    LOG_WARNING(Core_Vr, "The {} Move controller's grip space could not be made",
+                                hand == 0 ? "left" : "right");
+                }
             }
         }
         actions_ready = true;
@@ -902,11 +919,161 @@ struct OpenXrHost::Impl {
                  why);
     }
 
+    void ReleaseMoveControllers(const char* why) {
+        Runtime::Instance().ReleaseMoves();
+        for (u32 hand = 0; hand < moves_connected.size(); ++hand) {
+            if (moves_connected[hand]) {
+                LOG_INFO(Core_Vr, "The {} PS Move controller disconnected: {}",
+                         hand == 0 ? "left" : "right", why);
+            }
+            moves_connected[hand] = false;
+            moves_tracked[hand] = false;
+        }
+        ApplyMoveRumble(false);
+    }
+
+    /// Each Touch controller is its own Move. The grip action, rather than activity on the
+    /// other hand's buttons, determines whether that particular controller is connected.
+    void UpdateMoves(XrTime time) {
+        auto& runtime = Runtime::Instance();
+        const auto pressed = [&](XrAction action) {
+            XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+            get.action = action;
+            XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
+            return XR_SUCCEEDED(xrGetActionStateBoolean(session, &get, &value)) &&
+                   value.isActive == XR_TRUE && value.currentState == XR_TRUE;
+        };
+        const auto pulled = [&](XrAction action) {
+            XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+            get.action = action;
+            XrActionStateFloat value{XR_TYPE_ACTION_STATE_FLOAT};
+            if (XR_FAILED(xrGetActionStateFloat(session, &get, &value)) ||
+                value.isActive != XR_TRUE || !std::isfinite(value.currentState)) {
+                return 0.0f;
+            }
+            return std::clamp(value.currentState, 0.0f, 1.0f);
+        };
+        const auto stick = [&](XrAction action) {
+            XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+            get.action = action;
+            XrActionStateVector2f value{XR_TYPE_ACTION_STATE_VECTOR2F};
+            if (XR_FAILED(xrGetActionStateVector2f(session, &get, &value)) ||
+                value.isActive != XR_TRUE || !std::isfinite(value.currentState.x) ||
+                !std::isfinite(value.currentState.y)) {
+                return XrVector2f{};
+            }
+            return value.currentState;
+        };
+        for (u32 hand = 0; hand < moves_connected.size(); ++hand) {
+            MoveHostState sample{};
+            XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
+            get.action = act_grip;
+            get.subactionPath = hand_paths[hand];
+            XrActionStatePose pose{XR_TYPE_ACTION_STATE_POSE};
+            sample.connected = grip_spaces[hand] != XR_NULL_HANDLE &&
+                               XR_SUCCEEDED(xrGetActionStatePose(session, &get, &pose)) &&
+                               pose.isActive == XR_TRUE;
+            if (sample.connected) {
+                const bool left = hand == 0;
+                const XrVector2f thumbstick = stick(left ? act_move : act_finger);
+                sample.buttons = MoveInput::MapTouchButtons({
+                    .primary = pressed(left ? act_circle : act_cross),
+                    .secondary = pressed(left ? act_triangle : act_square),
+                    .stick_click = pressed(left ? act_l3 : act_finger_press),
+                    // The right system button is reserved by the headset runtime.
+                    .menu = left && pressed(act_options),
+                    .squeeze = pulled(left ? act_l1 : act_r1),
+                    .stick_x = thumbstick.x,
+                    .stick_y = thumbstick.y,
+                });
+                sample.trigger = pulled(left ? act_l2 : act_r2);
+
+                XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
+                XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+                location.next = &velocity;
+                static constexpr XrSpaceLocationFlags Valid =
+                    XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+                static constexpr XrSpaceLocationFlags Tracked =
+                    XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+                    XR_SPACE_LOCATION_POSITION_TRACKED_BIT;
+                if (XR_SUCCEEDED(xrLocateSpace(grip_spaces[hand], local_space, time, &location)) &&
+                    (location.locationFlags & Valid) == Valid) {
+                    sample.device.pose.position = {
+                        location.pose.position.x, location.pose.position.y, location.pose.position.z};
+                    // Runtime validates the entire raw pose before normalizing or transforming it.
+                    sample.device.pose.orientation = {
+                        location.pose.orientation.x, location.pose.orientation.y,
+                        location.pose.orientation.z, location.pose.orientation.w};
+                    if ((velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) != 0) {
+                        sample.linear_velocity_valid = true;
+                        sample.device.linear_velocity = {velocity.linearVelocity.x,
+                                                         velocity.linearVelocity.y,
+                                                         velocity.linearVelocity.z};
+                    }
+                    if ((velocity.velocityFlags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) != 0) {
+                        sample.angular_velocity_valid = true;
+                        sample.device.angular_velocity = {velocity.angularVelocity.x,
+                                                          velocity.angularVelocity.y,
+                                                          velocity.angularVelocity.z};
+                    }
+                    sample.device.tracked = (location.locationFlags & Tracked) == Tracked;
+                }
+            }
+            runtime.UpdateMove(hand, sample);
+            moves_tracked[hand] = sample.device.tracked;
+            if (sample.connected != moves_connected[hand]) {
+                LOG_INFO(Core_Vr, "The {} PS Move controller {}", hand == 0 ? "left" : "right",
+                         sample.connected ? "connected" : "disconnected");
+                moves_connected[hand] = sample.connected;
+            }
+        }
+        ApplyMoveRumble(true);
+    }
+
+    /// Poll feedback on the XR thread. A guest's motor request never calls OpenXR directly,
+    /// and each hand's short pulse is refreshed independently while actually tracked.
+    void ApplyMoveRumble(bool on) {
+        if (!actions_ready || session == XR_NULL_HANDLE) {
+            return;
+        }
+        const auto now = Clock::now();
+        for (u32 hand = 0; hand < moves_connected.size(); ++hand) {
+            const u8 wanted = on && session_running && moves_connected[hand] && moves_tracked[hand]
+                                  ? Runtime::Instance().GetMoveFeedback(hand).intensity
+                                  : 0;
+            if (wanted == move_rumble_applied[hand] &&
+                (wanted == 0 || now - move_rumble_time[hand] < std::chrono::milliseconds{50})) {
+                continue;
+            }
+            XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+            info.action = act_rumble;
+            info.subactionPath = hand_paths[hand];
+            XrResult result;
+            if (wanted != 0) {
+                XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
+                vibration.duration = 100'000'000;
+                vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
+                vibration.amplitude = static_cast<float>(wanted) / 255.0f;
+                result = xrApplyHapticFeedback(
+                    session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+            } else {
+                result = xrStopHapticFeedback(session, &info);
+            }
+            if (XR_SUCCEEDED(result)) {
+                move_rumble_applied[hand] = wanted;
+                move_rumble_time[hand] = now;
+            }
+        }
+    }
+
     /// Reads the headset's controllers and hands what they say on as the first player's
     /// gamepad, while the PC has no gamepad of its own.
     void UpdateControllers(XrTime time) {
         actions_synced = false;
-        if (!actions_ready) {
+        if (!actions_ready || !session_running) {
+            if (Runtime::Instance().IsMoveEnabled()) {
+                ReleaseMoveControllers("the headset's input session is inactive");
+            }
             return;
         }
         const XrActiveActionSet active{action_set, XR_NULL_PATH};
@@ -917,9 +1084,19 @@ struct OpenXrHost::Impl {
         if (xrSyncActions(session, &sync) != XR_SUCCESS) {
             ReleaseControllers("the game is not what the player has in front of them");
             ApplyRumble(false);
+            if (Runtime::Instance().IsMoveEnabled()) {
+                ReleaseMoveControllers("the headset's input actions could not be synchronized");
+            }
             return;
         }
         actions_synced = true;
+        if (Runtime::Instance().IsMoveEnabled()) {
+            // Move is explicitly selected, even if an SDL gamepad or an input script exists.
+            ReleaseControllers("the headset's controllers are being used as PS Move");
+            ApplyRumble(false);
+            UpdateMoves(time);
+            return;
+        }
         if (!use_controllers) {
             // Only where they are is of interest (see UpdatePad).
             return;
@@ -1172,6 +1349,9 @@ struct OpenXrHost::Impl {
     void DestroySession() {
         accepting = false;
         showing = false;
+        if (Runtime::Instance().IsMoveEnabled()) {
+            ReleaseMoveControllers("the headset's session ended");
+        }
         if (session_lost && was_focused) {
             // The headset went away in the middle of the game (its connection broke, it was
             // switched off): the game waits for it, as it does on the console.
@@ -1199,6 +1379,8 @@ struct OpenXrHost::Impl {
             }
         }
         ReleaseControllers("the headset's session ended");
+        move_rumble_applied = {};
+        move_rumble_time = {};
         actions_ready = false;
         actions_synced = false;
         pad_source = 0;
@@ -1256,6 +1438,10 @@ struct OpenXrHost::Impl {
                     *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
                 state = changed.state;
                 LOG_INFO(Core_Vr, "Headset session: {}", StateName(state));
+                if (state != XR_SESSION_STATE_FOCUSED && Runtime::Instance().IsMoveEnabled()) {
+                    // Do this before xrEndSession or a blocking frame wait loses the chance.
+                    ReleaseMoveControllers("the headset's session is no longer focused");
+                }
                 switch (state) {
                 case XR_SESSION_STATE_READY: {
                     XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
@@ -1293,6 +1479,9 @@ struct OpenXrHost::Impl {
             }
             case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
                 LOG_INFO(Core_Vr, "The headset's runtime is going away");
+                if (Runtime::Instance().IsMoveEnabled()) {
+                    ReleaseMoveControllers("the headset's runtime was lost");
+                }
                 session_lost = true;
                 instance_lost = true;
                 break;
@@ -1618,6 +1807,11 @@ struct OpenXrHost::Impl {
         // The headset's own "reset view" moves the space poses are given in: from the moment
         // it says, where the head is then is where the player sits.
         if (space_change_time != 0 && time >= space_change_time) {
+            if (runtime.IsMoveEnabled()) {
+                // The next grip sample uses new host coordinates. Do not differentiate it
+                // against old-space history or replay feedback from the previous tracking frame.
+                ReleaseMoveControllers("the headset's tracking space changed");
+            }
             space_change_time = 0;
             LOG_INFO(Core_Vr, "View reset in the headset's own system");
             runtime.RequestRecenter();
@@ -1715,6 +1909,15 @@ struct OpenXrHost::Impl {
     /// apart give away where it is and which way it points.
     void UpdatePad(XrTime time) {
         auto& runtime = Runtime::Instance();
+        if (runtime.IsMoveEnabled()) {
+            // Hands holding Moves must not also place or steer the title's gamepad.
+            if (pad_seen) {
+                runtime.ClearPadPosition();
+                pad_seen = false;
+                pad_source = 0;
+            }
+            return;
+        }
         bool seen = false;
         std::optional<XrVector3f> left;
         std::optional<XrVector3f> right;
@@ -2180,7 +2383,8 @@ struct OpenXrHost::Impl {
                  correction_samples != 0 ? correction / static_cast<float>(correction_samples)
                                          : 0.0f,
                  correction_worst);
-        if ((has_hand_tracking || (use_grips && actions_ready)) && !controllers_used) {
+        if (!Runtime::Instance().IsMoveEnabled() &&
+            (has_hand_tracking || (use_grips && actions_ready)) && !controllers_used) {
             const float held = pad_samples != 0 ? 1.0f / static_cast<float>(pad_samples) : 0.0f;
             LOG_INFO(Core_Vr,
                      "Hands: both seen {:.0f}% of the time, {:.2f} m apart; holding the "

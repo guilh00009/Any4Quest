@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -80,6 +81,12 @@ public:
     void SetBuffers(const std::vector<int>& fds, uint32_t width, uint32_t height, uint32_t stride);
     void SendPose(const Core::Vr::Protocol::Pose& pose);
     void SendPadPose(const Core::Vr::Protocol::PadPose& pose);
+    void SendMoveState(const Core::Vr::Protocol::MoveState& state);
+    struct MoveFeedbackSample {
+        Core::Vr::Protocol::MoveFeedback message;
+        std::chrono::steady_clock::time_point received;
+    };
+    std::optional<MoveFeedbackSample> GetMoveFeedback(uint32_t hand);
     void SendOptics(float ipd);
     /// The display refreshes: the emulated headset keeps step with it (`rate` in Hz).
     void SendRefresh(float rate);
@@ -141,6 +148,7 @@ private:
     std::string message;
     PadState pad;
     std::optional<Core::Vr::Protocol::Frame> frame;
+    std::array<std::optional<MoveFeedbackSample>, 2> move_feedback;
     std::vector<int> buffer_fds;
     Core::Vr::Protocol::Buffers buffers{};
     bool buffers_sent{};

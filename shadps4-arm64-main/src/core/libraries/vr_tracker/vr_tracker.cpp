@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -11,6 +13,7 @@
 #include "core/libraries/error_codes.h"
 #include "core/libraries/kernel/time.h"
 #include "core/libraries/libs.h"
+#include "core/libraries/move/move.h"
 #include "core/libraries/vr_tracker/vr_tracker.h"
 #include "core/known_title.h"
 #include "core/libraries/vr_tracker/vr_tracker_error.h"
@@ -20,6 +23,9 @@
 
 namespace Libraries::VrTracker {
 
+// Serialize lifecycle and registration operations with reads. A recursive lock allows the
+// existing lookup helpers to be used by public entry points while holding the same lock.
+static std::recursive_mutex g_tracker_mutex;
 static bool g_library_initialized = false;
 
 // Internal memory
@@ -39,14 +45,18 @@ struct PadRegistration {
     OrbisVrTrackerLedColor color;
 };
 static std::vector<PadRegistration> g_pads;
-static std::mutex g_pads_mutex;
-static s32 g_move_handle = -1;
+struct MoveRegistration {
+    s32 handle;
+    u32 hand;
+    OrbisVrTrackerLedColor color;
+};
+static std::vector<MoveRegistration> g_moves;
 static s32 g_gun_handle = -1;
 static s32 g_hmd_handle = -1;
 
 /// The registration of a DualShock 4 handle, if it is one.
 static std::optional<PadRegistration> FindPad(s32 handle) {
-    std::scoped_lock lock{g_pads_mutex};
+    std::scoped_lock lock{g_tracker_mutex};
     for (const PadRegistration& pad : g_pads) {
         if (pad.handle == handle) {
             return pad;
@@ -57,8 +67,25 @@ static std::optional<PadRegistration> FindPad(s32 handle) {
 
 /// Whether a handle is the player's controller, the one the host tracks.
 static bool IsPlayersPad(s32 handle) {
-    std::scoped_lock lock{g_pads_mutex};
+    std::scoped_lock lock{g_tracker_mutex};
     return !g_pads.empty() && g_pads.front().handle == handle;
+}
+
+static std::optional<MoveRegistration> FindMove(s32 handle) {
+    std::scoped_lock lock{g_tracker_mutex};
+    for (const auto& move : g_moves) {
+        if (move.handle == handle) {
+            return move;
+        }
+    }
+    return std::nullopt;
+}
+
+static void ClearRegistrations() {
+    g_pads.clear();
+    g_moves.clear();
+    g_hmd_handle = -1;
+    g_gun_handle = -1;
 }
 
 static bool HeadsetConnected() {
@@ -112,8 +139,13 @@ s32 PS4_SYSV_ABI sceVrTrackerQueryMemory(const OrbisVrTrackerQueryMemoryParam* p
 }
 
 s32 PS4_SYSV_ABI sceVrTrackerInit(const OrbisVrTrackerInitParam* param) {
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_ALREADY_INITIALIZED;
+    }
+
+    if (param == nullptr) {
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
     }
 
     // Calculate correct onion size for parameter checks
@@ -137,8 +169,10 @@ s32 PS4_SYSV_ABI sceVrTrackerInit(const OrbisVrTrackerInitParam* param) {
         param->work_memory_alignment != ORBIS_VR_TRACKER_MEMORY_ALIGNMENT ||
         param->work_memory_size != ORBIS_VR_TRACKER_WORK_SIZE ||
         // Check compute queue parameters
-        param->gpu_pipe_id >= AmdGpu::Liverpool::NumComputePipes ||
-        param->gpu_queue_id >= AmdGpu::Liverpool::NumQueuesPerPipe ||
+        param->gpu_pipe_id < 0 ||
+        static_cast<u32>(param->gpu_pipe_id) >= AmdGpu::Liverpool::NumComputePipes ||
+        param->gpu_queue_id < 0 ||
+        static_cast<u32>(param->gpu_queue_id) >= AmdGpu::Liverpool::NumQueuesPerPipe ||
         // Check calibration settings
         param->calibration_settings.pad_position >
             OrbisVrTrackerCalibrationMode::ORBIS_VR_TRACKER_CALIBRATION_AUTO ||
@@ -183,6 +217,7 @@ s32 PS4_SYSV_ABI sceVrTrackerInit(const OrbisVrTrackerInitParam* param) {
 
     // All initialization checks passed.
     LOG_INFO(Lib_VrTracker, "called, virtual headset connected = {}", HeadsetConnected());
+    ClearRegistrations();
     g_library_initialized = true;
 
     return ORBIS_OK;
@@ -204,14 +239,17 @@ s32 PS4_SYSV_ABI sceVrTrackerRegisterDeviceInternal(const OrbisVrTrackerDeviceTy
                                                     const s32 handle, s32 unk0, s32 unk1) {
     LOG_WARNING(Lib_VrTracker, "(STUBBED) called, device_type = {}, handle = {}",
                 static_cast<u32>(device_type), handle);
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
-    if (device_type > OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_GUN || unk0 > 4) {
+    if (device_type < OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_HMD ||
+        device_type > OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_GUN || unk0 < -1 ||
+        unk0 > 4 || handle < 0) {
         return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID;
     }
 
-    // Ignore handle handle validation for now, since most of that logic isn't really handled.
+    // Move handles are resolved through libSceMove; existing HMD/pad semantics are retained.
     switch (device_type) {
     case OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_HMD: {
         if (g_hmd_handle != -1) {
@@ -224,7 +262,7 @@ s32 PS4_SYSV_ABI sceVrTrackerRegisterDeviceInternal(const OrbisVrTrackerDeviceTy
         OrbisVrTrackerLedColor color;
         bool players;
         {
-            std::scoped_lock lock{g_pads_mutex};
+            std::scoped_lock lock{g_tracker_mutex};
             for (const PadRegistration& pad : g_pads) {
                 if (pad.handle == handle) {
                     return ORBIS_VR_TRACKER_ERROR_DEVICE_ALREADY_REGISTERED;
@@ -265,10 +303,31 @@ s32 PS4_SYSV_ABI sceVrTrackerRegisterDeviceInternal(const OrbisVrTrackerDeviceTy
         break;
     }
     case OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_MOVE: {
-        if (g_move_handle != -1) {
+        const auto hand = Move::HandForHandle(handle);
+        if (!hand) {
+            return ORBIS_VR_TRACKER_ERROR_INVALID_DEVICE_HANDLE;
+        }
+        // Closing a Move invalidates its old registration even if the title has not yet
+        // called UnregisterDevice. Never transfer that registration to the next handle.
+        std::erase_if(g_moves, [](const MoveRegistration& move) {
+            return !Move::HandForHandle(move.handle).has_value();
+        });
+        if (std::ranges::any_of(g_moves, [&](const MoveRegistration& move) {
+                return move.handle == handle || move.hand == *hand;
+            })) {
             return ORBIS_VR_TRACKER_ERROR_DEVICE_ALREADY_REGISTERED;
         }
-        g_move_handle = handle;
+        if (g_moves.size() >= 2) {
+            return ORBIS_VR_TRACKER_ERROR_DEVICE_LIMIT;
+        }
+        const auto color = unk0 >= 0 ? static_cast<OrbisVrTrackerLedColor>(unk0)
+                                    : (*hand == 0 ? ORBIS_VR_TRACKER_LED_COLOR_MAGENTA
+                                                  : ORBIS_VR_TRACKER_LED_COLOR_CYAN);
+        g_moves.push_back({handle, *hand, color});
+        static constexpr u8 Colours[5][3] = {
+            {0, 0, 255}, {255, 0, 0}, {0, 255, 255}, {255, 0, 255}, {255, 255, 0}};
+        const auto& rgb = Colours[static_cast<s32>(color)];
+        Core::Vr::Runtime::Instance().SetMoveLight(*hand, rgb[0], rgb[1], rgb[2]);
         break;
     }
     case OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_GUN: {
@@ -289,6 +348,7 @@ s32 PS4_SYSV_ABI sceVrTrackerRegisterDeviceInternal(const OrbisVrTrackerDeviceTy
 
 s32 PS4_SYSV_ABI sceVrTrackerCpuProcess(const OrbisVrTrackerCpuProcessParam* param) {
     LOG_TRACE(Lib_VrTracker, "called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -304,6 +364,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGetPlayAreaWarningInfo(OrbisVrTrackerPlayAreaWarnin
 s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param,
                                        OrbisVrTrackerResultData* result) {
     LOG_TRACE(Lib_VrTracker, "called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -315,9 +376,10 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
     const s32 handle = param->handle;
     const bool is_hmd = handle == g_hmd_handle;
     const auto pad_registration = FindPad(handle);
+    const auto move_registration = FindMove(handle);
     // (Another player's controller is registered, but nothing tracks it.)
     const bool is_pad = pad_registration.has_value() && IsPlayersPad(handle);
-    if (!is_hmd && !pad_registration && handle != g_move_handle && handle != g_gun_handle) {
+    if (!is_hmd && !pad_registration && !move_registration && handle != g_gun_handle) {
         return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED;
     }
 
@@ -326,7 +388,39 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
     result->user_frame_number = param->user_frame_number;
     result->camera_orientation_w = 1.0f;
 
-    // Only the headset and the first controller are tracked by the host.
+    if (move_registration) {
+        const auto hand = Move::HandForHandle(handle);
+        if (!hand || *hand != move_registration->hand) {
+            return ORBIS_VR_TRACKER_ERROR_INVALID_DEVICE_HANDLE;
+        }
+        const auto move = Core::Vr::Runtime::Instance().GetMove(*hand);
+        result->connected = move.connected ? 1 : 0;
+        result->timestamp = move.timestamp_us;
+        result->device_timestamp = move.timestamp_us;
+        result->led_color = move_registration->color;
+        result->status = ORBIS_VR_TRACKER_STATUS_NOT_TRACKING;
+        // Connection and optical tracking are independent. Do not turn the last known
+        // pose (or an identity pose for a never-seen hand) into a tracked controller.
+        if (!move.connected || !move.device.tracked || move.device.sequence == 0) {
+            return ORBIS_OK;
+        }
+        result->status = ORBIS_VR_TRACKER_STATUS_TRACKING;
+        result->position_quality = ORBIS_VR_TRACKER_QUALITY_FULL;
+        result->orientation_quality = ORBIS_VR_TRACKER_QUALITY_FULL;
+        result->velocity_x = move.device.linear_velocity.x;
+        result->velocity_y = move.device.linear_velocity.y;
+        result->velocity_z = move.device.linear_velocity.z;
+        result->angular_velocity_x = move.device.angular_velocity.x;
+        result->angular_velocity_y = move.device.angular_velocity.y;
+        result->angular_velocity_z = move.device.angular_velocity.z;
+        // The libSceMove accelerometer includes gravity in device-local g. The public
+        // tracker reconstruction names acceleration/angular-acceleration fields without
+        // specifying their units or frame; leave them zero rather than assume a contract.
+        WritePose(result->move_info.device_pose, move.device.pose);
+        return ORBIS_OK;
+    }
+
+    // Preserve the existing headset/first-pad tracking path used by Astro Bot.
     if (!HeadsetConnected() || (!is_hmd && !is_pad)) {
         result->status = OrbisVrTrackerStatus::ORBIS_VR_TRACKER_STATUS_NOT_TRACKING;
         return ORBIS_OK;
@@ -395,6 +489,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGetResult(const OrbisVrTrackerGetResultParam* param
 
 s32 PS4_SYSV_ABI sceVrTrackerGetTime(u64* time) {
     LOG_TRACE(Lib_VrTracker, "called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -407,6 +502,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGetTime(u64* time) {
 
 s32 PS4_SYSV_ABI sceVrTrackerGpuSubmit(const OrbisVrTrackerGpuSubmitParam* param) {
     LOG_TRACE(Lib_VrTracker, "called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -424,6 +520,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGpuSubmit(const OrbisVrTrackerGpuSubmitParam* param
 
 s32 PS4_SYSV_ABI sceVrTrackerGpuWait(const OrbisVrTrackerGpuWaitParam* param) {
     LOG_TRACE(Lib_VrTracker, "called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -440,6 +537,7 @@ s32 PS4_SYSV_ABI sceVrTrackerGpuWait(const OrbisVrTrackerGpuWaitParam* param) {
 
 s32 PS4_SYSV_ABI sceVrTrackerGpuWaitAndCpuProcess() {
     LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -459,6 +557,7 @@ sceVrTrackerNotifyEndOfCpuProcess(const OrbisVrTrackerNotifyEndOfCpuProcessParam
 
 s32 PS4_SYSV_ABI sceVrTrackerRecalibrate(const OrbisVrTrackerRecalibrateParam* param) {
     LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -477,14 +576,16 @@ s32 PS4_SYSV_ABI sceVrTrackerRecalibrate(const OrbisVrTrackerRecalibrateParam* p
         break;
     }
     case OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4: {
-        std::scoped_lock lock{g_pads_mutex};
+        std::scoped_lock lock{g_tracker_mutex};
         if (g_pads.empty()) {
             return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED;
         }
         break;
     }
     case OrbisVrTrackerDeviceType::ORBIS_VR_TRACKER_DEVICE_MOVE: {
-        if (g_move_handle == -1) {
+        if (std::ranges::none_of(g_moves, [](const MoveRegistration& move) {
+                return Move::HandForHandle(move.handle).has_value();
+            })) {
             return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED;
         }
         break;
@@ -524,6 +625,7 @@ s32 PS4_SYSV_ABI sceVrTrackerSaveInternalBuffers() {
 s32 PS4_SYSV_ABI sceVrTrackerSetDurationUntilStatusNotTracking(
     const OrbisVrTrackerDeviceType device_type, const u32 duration_camera_frames) {
     LOG_ERROR(Lib_VrTracker, "(STUBBED) called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -637,6 +739,7 @@ s32 PS4_SYSV_ABI sceVrTrackerStopLiveCapture() {
 
 s32 PS4_SYSV_ABI sceVrTrackerUnregisterDevice(const s32 handle) {
     LOG_DEBUG(Lib_VrTracker, "called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
@@ -648,10 +751,10 @@ s32 PS4_SYSV_ABI sceVrTrackerUnregisterDevice(const s32 handle) {
         g_hmd_handle = -1;
     } else if (FindPad(handle)) {
         // (The next registered, if any, is the player's from now on.)
-        std::scoped_lock lock{g_pads_mutex};
+        std::scoped_lock lock{g_tracker_mutex};
         std::erase_if(g_pads, [&](const PadRegistration& pad) { return pad.handle == handle; });
-    } else if (handle == g_move_handle) {
-        g_move_handle = -1;
+    } else if (FindMove(handle)) {
+        std::erase_if(g_moves, [&](const MoveRegistration& move) { return move.handle == handle; });
     } else if (handle == g_gun_handle) {
         g_gun_handle = -1;
     } else {
@@ -664,9 +767,17 @@ s32 PS4_SYSV_ABI sceVrTrackerUnregisterDevice(const s32 handle) {
 
 s32 PS4_SYSV_ABI sceVrTrackerTerm() {
     LOG_DEBUG(Lib_VrTracker, "called");
+    std::scoped_lock lifecycle_lock{g_tracker_mutex};
     if (!g_library_initialized) {
         return ORBIS_VR_TRACKER_ERROR_NOT_INIT;
     }
+    ClearRegistrations();
+    g_garlic_memory_pointer = nullptr;
+    g_garlic_size = 0;
+    g_onion_memory_pointer = nullptr;
+    g_onion_size = 0;
+    g_work_memory_pointer = nullptr;
+    g_work_size = 0;
     g_library_initialized = false;
     return ORBIS_OK;
 }

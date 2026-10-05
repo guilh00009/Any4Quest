@@ -1,12 +1,13 @@
-# Starts ASTRO BOT Rescue Mission in the emulator for a headset connected to this PC (Virtual
-# Desktop, or anything else with an OpenXR runtime), and tells what is going on while it runs.
-# Started by "Play Astro Bot VR.bat"; settings are in settings.txt next to this file, and the
-# main ones can be chosen in a small window before the game starts.
-param([string]$SettingsFile = "", [switch]$NoMenu)
+# Starts a locally dumped game with the PC OpenXR runtime. The original Astro launcher keeps
+# its preferred title; the Any4Quest launcher lets the player choose among discovered games.
+# Selecting a game or an input profile is not a claim that the game is compatible.
+param([string]$SettingsFile = "", [switch]$NoMenu,
+      [ValidateSet("astro", "any")][string]$LauncherProfile = "astro")
 
 $ErrorActionPreference = "Continue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here
+$launcherName = if ($LauncherProfile -eq "any") { "Any4Quest VR" } else { "Astro Bot VR" }
 Set-Location $here
 if ($SettingsFile -eq "") { $SettingsFile = Join-Path $here "settings.txt" }
 
@@ -16,8 +17,8 @@ function Say([string]$text, [string]$color = "Gray") { Write-Host $text -Foregro
 function Read-Settings {
     $script:settings = [ordered]@{}
     $script:extraEnv = @()
-    if (Test-Path $SettingsFile) {
-        foreach ($line in Get-Content $SettingsFile) {
+    if (Test-Path -LiteralPath $SettingsFile) {
+        foreach ($line in Get-Content -LiteralPath $SettingsFile) {
             $line = $line.Trim()
             if ($line -eq "" -or $line.StartsWith("#")) { continue }
             $at = $line.IndexOf("=")
@@ -35,7 +36,7 @@ function Setting([string]$key, [string]$default = "") {
 # Writes key=value into the settings file: in place of the line that sets it, or at the end.
 function Save-Setting([string]$key, [string]$value) {
     $lines = @()
-    if (Test-Path $SettingsFile) { $lines = @(Get-Content $SettingsFile) }
+    if (Test-Path -LiteralPath $SettingsFile) { $lines = @(Get-Content -LiteralPath $SettingsFile) }
     $done = $false
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ($lines[$i] -match ("^\s*" + [regex]::Escape($key) + "\s*=")) {
@@ -44,7 +45,7 @@ function Save-Setting([string]$key, [string]$value) {
         }
     }
     if (-not $done) { $lines += "$key=$value" }
-    Set-Content -Path $SettingsFile -Value $lines -Encoding UTF8
+    Set-Content -LiteralPath $SettingsFile -Value $lines -Encoding UTF8
 }
 Read-Settings
 
@@ -65,7 +66,7 @@ function Show-Box([string]$text, [string]$buttons = "OK", [string]$icon = "Infor
     $owner = New-Object System.Windows.Forms.Form
     $owner.TopMost = $true
     try {
-        return [System.Windows.Forms.MessageBox]::Show($owner, $text, "Astro Bot VR", $buttons,
+        return [System.Windows.Forms.MessageBox]::Show($owner, $text, $launcherName, $buttons,
                                                        $icon, $default).ToString()
     } finally { $owner.Dispose() }
 }
@@ -145,30 +146,96 @@ function Get-GameInfo([string]$eboot) {
     return Read-Sfo ([System.IO.Path]::Combine($folder, "sce_sys", "param.sfo"))
 }
 
-# The unpacked game under a folder: the one this is made for, if there are several.
-function Find-Game([string]$top) {
-    $first = $null
+# Discovery is deterministic and never guesses from file size which package is the base game.
+# Metadata is for selection and diagnostics only; it does not establish compatibility.
+function Find-Games([string]$top) {
     foreach ($folder in (Get-Folders $top)) {
         $eboot = [System.IO.Path]::Combine($folder, "eboot.bin")
-        if (-not [System.IO.File]::Exists($eboot)) { continue }
-        if ((Get-GameInfo $eboot)["TITLE_ID"] -eq $madeFor) { return $eboot }
-        if ($null -eq $first) { $first = $eboot }
+        if ([System.IO.File]::Exists($eboot)) { $eboot }
     }
-    return $first
 }
-
-# The package under a folder: the largest, if there are several (a game's is larger than its
-# updates').
-function Find-Package([string]$top) {
-    $largest = $null
+function Find-Packages([string]$top) {
     foreach ($folder in (Get-Folders $top)) {
         try { $files = [System.IO.Directory]::GetFiles($folder, "*.pkg") } catch { continue }
         foreach ($file in $files) {
-            $info = New-Object System.IO.FileInfo($file)
-            if ($null -eq $largest -or $info.Length -gt $largest.Length) { $largest = $info }
+            if (Read-PackageId $file) { $file }
         }
     }
-    return $largest
+}
+function Test-AstroProfile($info) {
+    return ($info["TITLE_ID"] -eq "CUSA12392" -and $info["APP_VER"] -eq "01.00")
+}
+function New-GameCandidate([string]$path) {
+    $package = [System.IO.Path]::GetExtension($path) -ieq ".pkg"
+    $info = if ($package) { @{} } else { Get-GameInfo $path }
+    $title = if ($info["TITLE"]) { $info["TITLE"] } else { [System.IO.Path]::GetFileName([System.IO.Path]::GetDirectoryName($path)) }
+    $serial = if ($info["TITLE_ID"]) { $info["TITLE_ID"] } else { "unknown ID" }
+    $version = if ($info["APP_VER"]) { $info["APP_VER"] } else { "unknown version" }
+    $label = "$title | $serial | $version | $path"
+    if ($package) { $label = "Package (verify base game, not an update): " + [System.IO.Path]::GetFileName($path) + " | " + (Read-PackageId $path) + " | " + $path }
+    return [pscustomobject]@{ Path = $path; Label = $label; Info = $info; IsPackage = $package }
+}
+function Get-GameCandidates([string]$top) {
+    $paths = @(@(Find-Games $top) + @(Find-Packages $top) | Sort-Object -Unique)
+    foreach ($path in $paths) { New-GameCandidate $path }
+}
+# Astro retains its default when exactly one matching copy exists. All ambiguous choices,
+# including multiple copies/versions, require the player; no arbitrary first game is run.
+function Get-PreferredCandidate($candidates) {
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+    if ($LauncherProfile -eq "astro") {
+        $astro = @($candidates | Where-Object { -not $_.IsPackage -and (Test-AstroProfile $_.Info) })
+        if ($astro.Count -eq 1) { return $astro[0] }
+    }
+    return $null
+}
+function Select-GameCandidate($candidates) {
+    $preferred = Get-PreferredCandidate $candidates
+    if ($preferred) { return $preferred }
+    if ($candidates.Count -eq 0) { return $null }
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "$launcherName - choose a game"
+    $form.ClientSize = New-Object System.Drawing.Size(860, 330)
+    $form.StartPosition = "CenterScreen"
+    $form.TopMost = $true
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9.5)
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = "Choose your own local dump. Other games are experimental; discovery does not mean compatibility."
+    $label.SetBounds(16, 12, 828, 40)
+    $form.Controls.Add($label)
+    $list = New-Object System.Windows.Forms.ListBox
+    $list.SetBounds(16, 54, 828, 220)
+    $list.HorizontalScrollbar = $true
+    foreach ($candidate in $candidates) { [void]$list.Items.Add($candidate.Label) }
+    $form.Controls.Add($list)
+    $play = New-Object System.Windows.Forms.Button
+    $play.Text = "Choose"
+    $play.SetBounds(656, 288, 88, 30)
+    $play.Enabled = $false
+    $play.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $list.Add_SelectedIndexChanged({ $play.Enabled = $list.SelectedIndex -ge 0 })
+    $form.Controls.Add($play)
+    $form.AcceptButton = $play
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = "Cancel"
+    $cancel.SetBounds(756, 288, 88, 30)
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $form.Controls.Add($cancel)
+    $form.CancelButton = $cancel
+    try {
+        if ((Show-Form $form) -eq [System.Windows.Forms.DialogResult]::OK -and $list.SelectedIndex -ge 0) {
+            return $candidates[$list.SelectedIndex]
+        }
+        $script:selectionCancelled = $true
+        return $null
+    } finally { $form.Dispose() }
+}
+# Kept as a discovery helper for callers that only want unpacked games.
+function Find-Game([string]$top) {
+    $candidates = @(Find-Games $top | ForEach-Object { New-GameCandidate $_ })
+    $chosen = Get-PreferredCandidate $candidates
+    if ($chosen) { return $chosen.Path }
+    return $null
 }
 
 # What a package calls its content ("EP9000-CUSA12392_00-..."), or nothing if the file is not
@@ -190,7 +257,7 @@ function Read-PackageId([string]$path) {
 # when it was cancelled (and stopped).
 function Show-Unpacking($process, [string]$drive, [double]$freeBefore) {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Astro Bot VR"
+    $form.Text = $launcherName
     $form.ClientSize = New-Object System.Drawing.Size(460, 132)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
@@ -271,11 +338,15 @@ function Expand-Package($package) {
     $serial = "game"
     if ($contentId -match "[A-Z]{4}[0-9]{5}") { $serial = $Matches[0] }
     $target = Join-Path $gamesFolder $serial
-    if ($target.Length + 1 + $longestInside -gt 259) {
+    if ([System.IO.File]::Exists((Join-Path $target "eboot.bin"))) {
+        [void](Show-Box ("A game already exists in`n" + $target + "`n`nThe launcher will not replace it with a package or update. Choose its eboot.bin, or unpack a different copy to a separate folder yourself.") "OK" "Warning")
+        return $null
+    }
+    if ($serial -eq $madeFor -and $target.Length + 1 + $longestInside -gt 259) {
         [void](Show-Box ("The game cannot be unpacked into`n" + $target + "`n`nThat path is too long: some of the game's files would have a path of more than 259 characters, which the emulator cannot open. Move the AstroQuest folder somewhere with a shorter path, for example C:\Games\AstroQuest, and start again.") "OK" "Warning")
         return $null
     }
-    # What unpacking takes, by this game's own measure (12.5 GB out of a package of 6.9).
+    # Estimate based on Astro's dump; other games can require substantially more space.
     $needed = $package.Length * 1.85
     $drive = [System.IO.Path]::GetPathRoot($target)
     $free = -1
@@ -284,7 +355,7 @@ function Expand-Package($package) {
         [void](Show-Box ("Unpacking the game takes about " + (Gigabytes $needed) + ", and drive " + $drive + " has " + (Gigabytes $free) + " free.`n`nMake room, or move the AstroQuest folder to a drive that has it.") "OK" "Warning")
         return $null
     }
-    $answer = Show-Box ("The game is here as a package:`n`n" + $package.Name + "   (" + (Gigabytes $package.Length) + ")`n`nIt has to be unpacked before it can be played. That is done once, takes a minute or a few, and about " + (Gigabytes $needed) + " in`n" + $target + "`n`nUnpack it now?") "YesNo" "Question"
+    $answer = Show-Box ("The game is here as a package:`n`n" + $package.Name + "   (" + (Gigabytes $package.Length) + ")`n`nIt has to be unpacked before it can be played. That is done once, takes a minute or a few, and about " + (Gigabytes $needed) + " in`n" + $target + "`n`nThis is a space estimate, not a guarantee for other games. Use a base-game dump, not an update package.`n`nUnpack it now?") "YesNo" "Question"
     if ($answer -ne "Yes") { return $null }
 
     # Unpacked into a folder of its own first: what is left of an unpacking that did not finish
@@ -370,16 +441,15 @@ function Expand-Package($package) {
 # nothing.
 function Use-Path([string]$path) {
     if ([System.IO.Directory]::Exists($path)) {
-        $eboot = Find-Game $path
-        if ($eboot) { return $eboot }
-        $package = Find-Package $path
-        if ($package) { return Expand-Package $package }
-        return $null
+        $candidate = Select-GameCandidate @(Get-GameCandidates $path)
+        if (-not $candidate) { return $null }
+        $path = $candidate.Path
     }
     if (-not [System.IO.File]::Exists($path)) { return $null }
     if ([System.IO.Path]::GetExtension($path) -ieq ".pkg") {
         return Expand-Package (New-Object System.IO.FileInfo($path))
     }
+    if ([System.IO.Path]::GetFileName($path) -ine "eboot.bin") { return $null }
     return $path
 }
 
@@ -387,7 +457,7 @@ function Use-Path([string]$path) {
 # (look again) or quit.
 function Show-NotFound {
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Astro Bot VR"
+    $form.Text = $launcherName
     $form.ClientSize = New-Object System.Drawing.Size(600, 250)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
@@ -402,7 +472,7 @@ function Show-NotFound {
     $title.SetBounds(16, 14, 568, 26)
     $form.Controls.Add($title)
     $text = New-Object System.Windows.Forms.Label
-    $text.Text = "ASTRO BOT Rescue Mission was not found. AstroQuest does not contain the game: it plays your own copy of it.`n`nPut that copy in the games folder - either the game's folder (the one with eboot.bin in it) or its .pkg file - and choose Look again. Or leave it where it is and show where that is."
+    $text.Text = "No game was selected. This project does not contain games: it plays your own licensed local dumps.`n`nPut that copy in the games folder - either the game's folder (the one with eboot.bin in it) or its .pkg file - and choose Look again. Or leave it where it is and show where that is."
     $text.SetBounds(16, 50, 568, 96)
     $form.Controls.Add($text)
     $where = New-Object System.Windows.Forms.Label
@@ -453,7 +523,7 @@ function Show-NotFound {
 # The file picker: the game's eboot.bin or its package, wherever they are.
 function Select-GameFile {
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.Title = "Where is ASTRO BOT Rescue Mission? Choose its eboot.bin, or its .pkg file"
+    $dialog.Title = "Choose your game's eboot.bin, or its dumped .pkg file"
     $dialog.Filter = "The game (eboot.bin, *.pkg)|eboot.bin;*.pkg|All files (*.*)|*.*"
     $dialog.CheckFileExists = $true
     if ([System.IO.Directory]::Exists($gamesFolder)) { $dialog.InitialDirectory = $gamesFolder }
@@ -472,18 +542,20 @@ function Select-GameFile {
 
 # The eboot.bin to run, or nothing when the player gives up.
 function Resolve-Game {
+    $script:selectionCancelled = $false
     $named = Setting "game"
     if ($named -ne "") {
         $eboot = Use-Path $named
         if ($eboot) { return $eboot }
-        Say ("The settings name the game at " + $named + ", where it is not: looking in " + $gamesFolder) "Yellow"
+        if ($selectionCancelled) { return $null }
+        Say ("The settings path could not be used: " + $named + ". Looking in " + $gamesFolder) "Yellow"
     }
     while ($true) {
-        $eboot = Find-Game $gamesFolder
-        if ($eboot) { return $eboot }
-        $package = Find-Package $gamesFolder
-        if ($package) {
-            $eboot = Expand-Package $package
+        $candidates = @(Get-GameCandidates $gamesFolder)
+        if ($candidates.Count -gt 0) {
+            $candidate = Select-GameCandidate $candidates
+            if (-not $candidate) { return $null }
+            $eboot = Use-Path $candidate.Path
             if ($eboot) { return $eboot }
         }
         $choice = Show-NotFound
@@ -492,8 +564,10 @@ function Resolve-Game {
             if ($file) {
                 $eboot = Use-Path $file
                 if ($eboot) {
-                    # In the games folder it is found again by itself; elsewhere it is noted.
-                    $inGames = $eboot.StartsWith($gamesFolder + "\", [System.StringComparison]::OrdinalIgnoreCase)
+                    # An explicit external selection is remembered; the generic launcher still
+                    # asks among multiple games unless game= names one specific dump.
+                    $prefix = $gamesFolder.TrimEnd([char[]]"\/") + [System.IO.Path]::DirectorySeparatorChar
+                    $inGames = $eboot.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
                     if (-not $inGames) { Save-Setting "game" $eboot }
                     return $eboot
                 }
@@ -515,11 +589,12 @@ function Test-Runtime {
 }
 
 # --- the window -------------------------------------------------------------------------------
-function Show-Menu {
+function Show-Menu($info) {
+    $astro = Test-AstroProfile $info
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Astro Bot VR"
-    $form.ClientSize = New-Object System.Drawing.Size(560, 452)
+    $form.Text = $launcherName
+    $form.ClientSize = New-Object System.Drawing.Size(560, 510)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = "FixedDialog"
     $form.MaximizeBox = $false
@@ -529,13 +604,27 @@ function Show-Menu {
 
     $y = 14
     $title = New-Object System.Windows.Forms.Label
-    $title.Text = "ASTRO BOT Rescue Mission - PC VR"
+    $title.Text = "$launcherName - PC VR"
     $title.Font = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontStyle]::Bold)
     $title.SetBounds(16, $y, 520, 26)
     $form.Controls.Add($title)
     $y += 40
 
-    # Resolution.
+    # Explicit input profile; never inferred from a title or attached controller.
+    $inputLabel = New-Object System.Windows.Forms.Label
+    $inputLabel.Text = "Input profile"
+    $inputLabel.SetBounds(16, $y + 4, 150, 24)
+    $form.Controls.Add($inputLabel)
+    $inputMode = New-Object System.Windows.Forms.ComboBox
+    $inputMode.DropDownStyle = "DropDownList"
+    [void]$inputMode.Items.Add("gamepad")
+    [void]$inputMode.Items.Add("move")
+    $inputMode.SelectedIndex = if ((Get-InputMode) -eq "move") { 1 } else { 0 }
+    $inputMode.SetBounds(170, $y, 200, 26)
+    $form.Controls.Add($inputMode)
+    $y += 48
+
+    # Resolution (Astro-only).
     $label = New-Object System.Windows.Forms.Label
     $label.Text = "Resolution of each eye"
     $label.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
@@ -543,12 +632,14 @@ function Show-Menu {
     $form.Controls.Add($label)
     $y += 22
     $resolution = New-Object System.Windows.Forms.TrackBar
+    $resolution.Enabled = $astro
     $resolution.Minimum = 0
     $resolution.Maximum = $widths.Count - 1
     $resolution.TickFrequency = 1
     $resolution.LargeChange = 1
     $resolution.SetBounds(12, $y, 530, 40)
-    $current = [int](Setting "resolution" "2880")
+    $current = 0
+    [void][int]::TryParse((Setting "resolution" "2880"), [ref]$current)
     $index = [array]::IndexOf($widths, $current)
     if ($index -lt 0) { $index = 4 }
     $resolution.Value = $index
@@ -562,7 +653,7 @@ function Show-Menu {
         $h = EyeHeight $w
         $times = ($w * $h) / (1440.0 * 1536.0)
         $what = if ($w -eq 1440) { "the console's own, as a PlayStation 4 Pro draws it" } else { "{0:N2} times the pixels of the console" -f $times }
-        $resolutionText.Text = "$w x $h pixels an eye: $what. The game draws smaller by itself when the graphics card cannot keep up."
+        $resolutionText.Text = if ($astro) { "$w x $h pixels an eye: $what. The game draws smaller by itself when the graphics card cannot keep up." } else { "Astro-only resolution settings are disabled for this title/version. The game chooses its own rendering resolution." }
     }
     $resolution.Add_ValueChanged($update)
     & $update
@@ -576,6 +667,7 @@ function Show-Menu {
     $form.Controls.Add($label)
     $y += 24
     $fps = New-Object System.Windows.Forms.ComboBox
+    $fps.Enabled = $astro
     $fps.DropDownStyle = "DropDownList"
     foreach ($cap in $caps) {
         $text = "$cap"
@@ -590,6 +682,7 @@ function Show-Menu {
     $y += 32
     $fpsText = New-Object System.Windows.Forms.Label
     $fpsText.Text = "A frame lasts a whole number of the headset's refreshes, so the headset's refresh rate decides what is possible: at 120 Hz 120, 60, 40 or 30 frames a second, at 90 Hz 90, 45 or 30, at 72 Hz 72 or 36. Virtual Desktop sets the refresh rate (Settings > Streaming > Frame rate): choose 120 for 60 frames a second."
+    if (-not $astro) { $fpsText.Text = "Astro-only frame pacing and time-step enhancements are disabled for this title/version. Runtime refresh rate and the game control presentation; compatibility and correct game speed still need testing." }
     $fpsText.SetBounds(16, $y, 530, 84)
     $form.Controls.Add($fpsText)
     $y += 88
@@ -645,13 +738,107 @@ function Show-Menu {
     $form.CancelButton = $quit
 
     $result = Show-Form $form
-    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return $false }
-    Save-Setting "resolution" ($widths[$resolution.Value])
-    Save-Setting "fps" ($caps[$fps.SelectedIndex])
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) { $form.Dispose(); return $false }
+    if ($astro) {
+        Save-Setting "resolution" ($widths[$resolution.Value])
+        Save-Setting "fps" ($caps[$fps.SelectedIndex])
+    }
+    Save-Setting "input_mode" ($inputMode.SelectedItem.ToString())
     Save-Setting "fov" ($fov.Value * 5)
     Save-Setting "menu" ($(if ($again.Checked) { "1" } else { "0" }))
     Read-Settings
+    $form.Dispose()
     return $true
+}
+
+# The launcher owns these environment variables. Clear inherited values on every launch so
+# switching title/profile cannot leak Astro settings or an old controller mode into a game.
+function Get-ManagedEnvironmentNames {
+    return @("SHADPS4_TITLE_RESOLUTION", "SHADPS4_TITLE_EYE_WIDTH", "SHADPS4_TITLE_TIMESTEP",
+        "SHADPS4_VR_FPS_CAP", "SHADPS4_VR_FASTEST_PACE", "SHADPS4_VR_PACE",
+        "SHADPS4_VR_INPUT_MODE", "SHADPS4_VR_SHARPEN", "SHADPS4_MAX_MSAA", "SHADPS4_RESOLVE_AA",
+        "SHADPS4_XR_HANDS", "SHADPS4_XR_PREDICT_MS", "SHADPS4_STICK_TOUCHPAD",
+        "SHADPS4_VIRTUAL_SURROUND", "SHADPS4_VR_FOV", "SHADPS4_VR_FOV_OF", "SHADPS4_OPENXR",
+        "SHADPS4_XR_PAUSE", "SHADPS4_XR_CONTROLLERS", "SHADPS4_XR_PAD_HAND", "SHADPS4_XR_WAIT")
+}
+function Test-AstroEnvironment([string]$name) {
+    return $name -in @("SHADPS4_TITLE_RESOLUTION", "SHADPS4_TITLE_EYE_WIDTH", "SHADPS4_TITLE_TIMESTEP",
+                       "SHADPS4_VR_FPS_CAP", "SHADPS4_VR_FASTEST_PACE", "SHADPS4_VR_PACE")
+}
+function Get-InputMode {
+    $mode = (Setting "input_mode" "gamepad").ToLowerInvariant()
+    if ($mode -notin @("gamepad", "move")) {
+        throw "Invalid input_mode='$mode'. Choose input_mode=gamepad or input_mode=move in $SettingsFile."
+    }
+    return $mode
+}
+# Pure settings translation so the profile boundary is testable without launching a game.
+function Get-LaunchEnvironment($info) {
+    $values = [ordered]@{}
+    $astro = Test-AstroProfile $info
+    if ($astro) {
+        $resolution = Setting "resolution" "2880"
+        $dynamic = (Setting "dynamic" "1") -ne "0"
+        if ($resolution -eq "game") {
+            $values["SHADPS4_TITLE_RESOLUTION"] = "title"
+        } else {
+            $width = 0
+            if (-not [int]::TryParse($resolution, [ref]$width)) { $width = 2880 }
+            $smaller = @{ 816 = "3"; 960 = "4"; 1200 = "5" }
+            if ($smaller.ContainsKey($width)) {
+                $values["SHADPS4_TITLE_RESOLUTION"] = $smaller[$width]
+            } else {
+                $width = [math]::Max(1440, [math]::Min(4320, [int]([math]::Round($width / 8) * 8)))
+                if ($width -gt 1440) { $values["SHADPS4_TITLE_EYE_WIDTH"] = "$width" }
+                if (-not $dynamic) { $values["SHADPS4_TITLE_RESOLUTION"] = "6" }
+            }
+        }
+        if ((Setting "real_time" "1") -eq "0") { $values["SHADPS4_TITLE_TIMESTEP"] = "0" }
+        $values["SHADPS4_VR_FPS_CAP"] = Setting "fps" "60"
+        $pace = Setting "pace"
+        if ($pace -eq "1") {
+            $values["SHADPS4_VR_FASTEST_PACE"] = "1"
+            $values.Remove("SHADPS4_VR_FPS_CAP")
+        } elseif ($pace -ne "" -and $pace -ne "2") { $values["SHADPS4_VR_PACE"] = $pace }
+    }
+    # General OpenXR/render/audio settings: no title-specific memory patches are requested here.
+    $values["SHADPS4_VR_INPUT_MODE"] = Get-InputMode
+    $values["SHADPS4_VR_SHARPEN"] = Setting "sharpen" "0.3"
+    if ((Setting "msaa") -ne "") { $values["SHADPS4_MAX_MSAA"] = Setting "msaa" }
+    if ((Setting "antialias" "1") -eq "0") { $values["SHADPS4_RESOLVE_AA"] = "0" }
+    if ((Setting "hands" "1") -eq "0") { $values["SHADPS4_XR_HANDS"] = "0" }
+    if ((Setting "predict_ms") -ne "") { $values["SHADPS4_XR_PREDICT_MS"] = Setting "predict_ms" }
+    if ((Setting "stick_touchpad" "1") -eq "0") { $values["SHADPS4_STICK_TOUCHPAD"] = "0" }
+    if ((Setting "surround" "1") -eq "0") { $values["SHADPS4_VIRTUAL_SURROUND"] = "0" }
+    if ((Setting "fov" "100") -ne "100") { $values["SHADPS4_VR_FOV"] = Setting "fov" }
+    if ((Setting "fov_of" "headset") -ne "psvr") { $values["SHADPS4_VR_FOV_OF"] = "headset" }
+    if ((Setting "headset" "1") -eq "0") { $values["SHADPS4_OPENXR"] = "0" }
+    if ((Setting "pause" "1") -eq "0") { $values["SHADPS4_XR_PAUSE"] = "0" }
+    if ((Setting "controllers" "1") -eq "0") { $values["SHADPS4_XR_CONTROLLERS"] = "0" }
+    if ((Setting "controller_hand" "right") -eq "left") { $values["SHADPS4_XR_PAD_HAND"] = "left" }
+    $values["SHADPS4_XR_WAIT"] = Setting "wait" "60"
+    foreach ($pair in $extraEnv) {
+        $at = $pair.IndexOf("=")
+        if ($at -lt 1) { continue }
+        $name = $pair.Substring(0, $at).Trim()
+        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "Invalid environment variable name '$name'." }
+        if ($name -ieq "SHADPS4_VR_INPUT_MODE") { throw "Use input_mode=gamepad or input_mode=move, not env=SHADPS4_VR_INPUT_MODE." }
+        if (-not $astro -and (Test-AstroEnvironment $name)) { continue }
+        $values[$name] = $pair.Substring($at + 1)
+    }
+    return $values
+}
+function Set-LaunchEnvironment($info) {
+    $values = Get-LaunchEnvironment $info
+    foreach ($name in (Get-ManagedEnvironmentNames)) { Remove-Item -LiteralPath ("Env:" + $name) -ErrorAction SilentlyContinue }
+    foreach ($name in $values.Keys) { Set-Item -LiteralPath ("Env:" + $name) -Value $values[$name] }
+}
+function Get-LaunchSummary($info) {
+    $title = if ($info["TITLE"]) { $info["TITLE"] } else { "unknown title" }
+    $serial = if ($info["TITLE_ID"]) { $info["TITLE_ID"] } else { "unknown ID" }
+    $version = if ($info["APP_VER"]) { $info["APP_VER"] } else { "unknown version" }
+    $profile = if (Test-AstroProfile $info) { "astro-cusa12392-01.00 (runtime code guard still required)" } else { "generic-experimental" }
+    return "Title: $title | ID: $serial | Version: $version | Input: $env:SHADPS4_VR_INPUT_MODE | Enhancements: $profile"
 }
 
 $emulator = Join-Path $here "shadps4.exe"
@@ -671,68 +858,30 @@ Say ("The game: " + $game)
 $info = Get-GameInfo $game
 if ($info.Count -eq 0) {
     Say "sce_sys\param.sfo is missing next to it: this is not a complete copy of the game, and the emulator may not know it." "Yellow"
-} elseif ($info["TITLE_ID"] -ne $madeFor -or $info["APP_VER"] -ne "01.00") {
-    Say ("This is " + $info["TITLE"] + ", " + $info["TITLE_ID"] + " version " + $info["APP_VER"] + ". AstroQuest is made for the European release, " + $madeFor + " version 01.00: with another, its fixes for the game's speed and picture do not apply, and it may not run.") "Yellow"
+} elseif (-not (Test-AstroProfile $info)) {
+    Say "Experimental title/version: Astro-specific resolution, time-step and frame-pacing settings are disabled. Launching does not establish compatibility." "Yellow"
 } elseif ([System.IO.Path]::GetDirectoryName($game).Length + 1 + $longestInside -gt 259) {
     [void](Show-Box ("The game is in`n" + [System.IO.Path]::GetDirectoryName($game) + "`n`nThat path is too long: some of the game's files have a path of more than 259 characters there, which the emulator cannot open, and the game would stop when it needs them. Move the folder somewhere with a shorter path, for example C:\Games\AstroQuest, and start again.") "OK" "Warning")
     exit 1
 }
 
+try { $null = Get-InputMode } catch {
+    [void](Show-Box $_.Exception.Message "OK" "Error")
+    exit 1
+}
 if (-not $NoMenu -and (Setting "menu" "1") -ne "0") {
-    if (-not (Show-Menu)) { exit 0 }
+    if (-not (Show-Menu $info)) { exit 0 }
 }
 
-# What the settings mean to the emulator.
-# resolution: the width of an eye (1440 the console's; larger ones are the game's sizes grown,
-# with the memory that takes). game: the console's sizes, chosen by the game itself.
-$resolution = Setting "resolution" "2880"
-$dynamic = (Setting "dynamic" "1") -ne "0"
-if ($resolution -eq "game") {
-    $env:SHADPS4_TITLE_RESOLUTION = "title"
-} else {
-    $width = 0
-    if (-not [int]::TryParse($resolution, [ref]$width)) { $width = 2880 }
-    # (The console's other sizes, 816 to 1200, as they were offered before.)
-    $smaller = @{ 816 = "3"; 960 = "4"; 1200 = "5" }
-    if ($smaller.ContainsKey($width)) {
-        $env:SHADPS4_TITLE_RESOLUTION = $smaller[$width]
-    } else {
-        $width = [math]::Max(1440, [math]::Min(4320, [int]([math]::Round($width / 8) * 8)))
-        if ($width -gt 1440) { $env:SHADPS4_TITLE_EYE_WIDTH = "$width" }
-        # Left to choose, the emulator draws smaller where the graphics card falls behind.
-        if (-not $dynamic) { $env:SHADPS4_TITLE_RESOLUTION = "6" }
-    }
-}
-$env:SHADPS4_VR_SHARPEN = Setting "sharpen" "0.3"
-if ((Setting "msaa") -ne "") { $env:SHADPS4_MAX_MSAA = Setting "msaa" }
-if ((Setting "antialias" "1") -eq "0") { $env:SHADPS4_RESOLVE_AA = "0" }
-if ((Setting "hands" "1") -eq "0") { $env:SHADPS4_XR_HANDS = "0" }
-if ((Setting "predict_ms") -ne "") { $env:SHADPS4_XR_PREDICT_MS = Setting "predict_ms" }
-if ((Setting "stick_touchpad" "1") -eq "0") { $env:SHADPS4_STICK_TOUCHPAD = "0" }
-if ((Setting "surround" "1") -eq "0") { $env:SHADPS4_VIRTUAL_SURROUND = "0" }
-if ((Setting "real_time" "1") -eq "0") { $env:SHADPS4_TITLE_TIMESTEP = "0" }
-$fovSetting = Setting "fov" "100"
-if ($fovSetting -ne "100") { $env:SHADPS4_VR_FOV = $fovSetting }
-# fov_of: what fov is a percent of. headset: what the headset being worn shows, all of it at 100
-# (the emulator asks the headset as it starts). psvr: a PlayStation VR's, as the game was made.
-if ((Setting "fov_of" "headset") -ne "psvr") { $env:SHADPS4_VR_FOV_OF = "headset" }
-# fps: the most frames a second. (pace, the older way to say it: refreshes of the headset a
-# frame is given, 1 or more.)
-$env:SHADPS4_VR_FPS_CAP = Setting "fps" "60"
-$pace = Setting "pace" ""
-if ($pace -eq "1") { $env:SHADPS4_VR_FASTEST_PACE = "1"; $env:SHADPS4_VR_FPS_CAP = "" } elseif ($pace -ne "" -and $pace -ne "2") { $env:SHADPS4_VR_PACE = $pace }
-if ((Setting "headset" "1") -eq "0") { $env:SHADPS4_OPENXR = "0" }
-if ((Setting "pause" "1") -eq "0") { $env:SHADPS4_XR_PAUSE = "0" }
-if ((Setting "controllers" "1") -eq "0") { $env:SHADPS4_XR_CONTROLLERS = "0" }
-if ((Setting "controller_hand" "right") -eq "left") { $env:SHADPS4_XR_PAD_HAND = "left" }
-$env:SHADPS4_XR_WAIT = Setting "wait" "60"
-foreach ($pair in $extraEnv) {
-    $at = $pair.IndexOf("=")
-    if ($at -ge 1) { Set-Item -Path ("Env:" + $pair.Substring(0, $at)) -Value $pair.Substring($at + 1) }
+try { Set-LaunchEnvironment $info } catch {
+    [void](Show-Box $_.Exception.Message "OK" "Error")
+    exit 1
 }
 
 # --- what is there ----------------------------------------------------------------------------
-Say "ASTRO BOT Rescue Mission - PC VR" "Cyan"
+Say "$launcherName - PC VR" "Cyan"
+$launchSummary = Get-LaunchSummary $info
+Say $launchSummary "Cyan"
 if ($env:SHADPS4_TITLE_EYE_WIDTH) {
     Say ("Each eye up to " + $env:SHADPS4_TITLE_EYE_WIDTH + " x " + (EyeHeight ([int]$env:SHADPS4_TITLE_EYE_WIDTH)) + ", at most " + $env:SHADPS4_VR_FPS_CAP + " frames a second.")
 }
@@ -765,13 +914,22 @@ Say "In the headset: connect Virtual Desktop to this PC. The game moves into the
 if ($env:SHADPS4_OPENXR -ne "0" -and [int]$env:SHADPS4_XR_WAIT -gt 0) {
     Say ("The game waits up to " + $env:SHADPS4_XR_WAIT + " seconds for the headset before it starts on the monitor.")
 }
-Say "The DualSense: connect it to THIS PC (USB cable, or Bluetooth paired with the PC). Paired with"
-Say "the headset, it reaches the PC through Virtual Desktop without motion sensors or touchpad."
-Say "Where it is in the game comes from your hands: hand tracking on in the headset, and in"
-Say "Virtual Desktop's settings hand tracking forwarded to the PC."
-Say "Hold OPTIONS for a second (or press the PS button) to reset the view."
-Say "No gamepad: the headset's own controllers play (A jump, B punch, right stick = touchpad,"
-Say "press both sticks in to reset the view)."
+if ($env:SHADPS4_VR_INPUT_MODE -eq "move") {
+    Say "Input: experimental dual Move emulation from tracked OpenXR controllers. See README-ANY4QUEST.md."
+    Say "Use tracked controllers, not inferred hand-only poses. Game support still requires validation."
+} else {
+    Say "The DualSense: connect it to THIS PC (USB cable, or Bluetooth paired with the PC). Paired with"
+    Say "the headset, it reaches the PC through Virtual Desktop without motion sensors or touchpad."
+    Say "Where it is in the game comes from your hands: hand tracking on in the headset, and in"
+    Say "Virtual Desktop's settings hand tracking forwarded to the PC."
+    Say "Hold OPTIONS for a second (or press the PS button) to reset the view."
+    if (Test-AstroProfile $info) {
+        Say "No gamepad: the headset's own controllers play (A jump, B punch, right stick = touchpad,"
+        Say "press both sticks in to reset the view)."
+    } else {
+        Say "Without a gamepad, headset controllers can stand in for one. Buttons depend on the game."
+    }
+}
 Say "Close the game's window to quit."
 Say ""
 # The emulator asks Windows for about 14 GB at once (the console's memory, and what the larger
@@ -790,6 +948,8 @@ try {
 $logDir = Join-Path $here "user\log"
 $log = Join-Path $logDir "shad_log.txt"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+@((Get-Date -Format o), $launchSummary, ("Game: " + $game)) |
+    Set-Content -LiteralPath (Join-Path $logDir "launcher.txt") -Encoding UTF8
 if (Test-Path $log) { Copy-Item $log (Join-Path $logDir "shad_log.prev.txt") -Force }
 
 # (In this console, with what it prints kept out of the way: a window style given here would

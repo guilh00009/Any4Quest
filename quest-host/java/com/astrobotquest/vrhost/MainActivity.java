@@ -93,7 +93,7 @@ public class MainActivity extends Activity
 
     private native void nativeStartXr(float refreshRate, int eyeWidth, int eyeHeight,
             boolean trackHands, int sharpen, boolean cubic, boolean showStats, float predictMs,
-            int dynamicResolution, boolean cpuBoost);
+            int dynamicResolution, boolean cpuBoost, boolean moveInput, boolean moveRumble);
 
     private native boolean nativeStartCore(String loader, String runtimeRoot, String storageRoot,
             String game, String logFile, String[] extraArgs, String[] extraEnv);
@@ -161,6 +161,8 @@ public class MainActivity extends Activity
     private boolean motion = true;
     private boolean rumble = true;
     private boolean trackHands = true;
+    private boolean moveInput;
+    private String gamePath;
     private int sharpen = 1;
     private boolean cubic;
     private boolean antialias = true;
@@ -226,7 +228,7 @@ public class MainActivity extends Activity
 
         readSettings();
         nativeStartXr(refreshRate, 1440, 1536, trackHands, sharpen, cubic, showStats, predictMs,
-                dynamicResolution, cpuBoost);
+                dynamicResolution, cpuBoost, moveInput, rumble);
         nativeSetMicrophone(microphone, microphoneGain);
         if (microphone && !dryRun && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -340,6 +342,10 @@ public class MainActivity extends Activity
      *                          emulator has it run by the clock
      *   hands=0                do not use hand tracking to place the controller; it is then held
      *                          at a fixed spot in front of the player
+     *   input_mode=move        use left/right Touch grip poses and buttons as two PS Move
+     *                          devices; default gamepad retains the DualSense/DS4 input path
+     *   game_path=games/CUSA... select a game folder or eboot.bin; relative paths start in
+     *                          the app's external files folder, absolute paths are accepted
      *   sharpen=0              leave the picture as soft as it gets from being shown larger
      *                          than it was drawn. By default (1) the emulator sharpens it once
      *                          per frame of the game. 2 has the headset do it instead, with its
@@ -430,6 +436,16 @@ public class MainActivity extends Activity
                     case "hands":
                         trackHands = !value.equals("0");
                         break;
+                    case "input_mode":
+                        if (!value.equals("move") && !value.equals("gamepad")) {
+                            logWarning("input_mode must be gamepad or move; keeping current mode", null);
+                            continue;
+                        }
+                        moveInput = value.equals("move");
+                        break;
+                    case "game_path":
+                        gamePath = value;
+                        break;
                     case "sharpen":
                         sharpen = Math.max(0, Math.min(4, Integer.parseInt(value)));
                         break;
@@ -507,11 +523,7 @@ public class MainActivity extends Activity
             File games = new File(external, "games");
             games.mkdirs();
             new File(external, "data/shadPS4/sys_modules").mkdirs();
-            File eboot = findGame(games);
-            if (eboot == null) {
-                // Where "adb push" can put it without caring who owns the files.
-                eboot = findGame(new File(SHELL_GAMES));
-            }
+            File eboot = GameSelection.resolve(gamePath, external, new File(SHELL_GAMES));
             if (eboot == null) {
                 setupFailed = true;
                 setupStatus = "No game found.\n\nCopy the extracted game folder (the one that "
@@ -586,6 +598,9 @@ public class MainActivity extends Activity
                 env.add("SHADPS4_VR_SHARPEN=0.6");
             }
             env.addAll(extraEnv);
+            // Both sides of the socket must select the same mode. Use input_mode rather
+            // than an env override, which cannot configure the already-started XR host.
+            env.add("SHADPS4_VR_INPUT_MODE=" + (moveInput ? "move" : "gamepad"));
 
             setupStatus = "Starting the emulator...";
             keepPrevious(new File(external, "core.log"), new File(external, "core.prev.log"));
@@ -604,24 +619,6 @@ public class MainActivity extends Activity
             setupFailed = true;
             setupStatus = "Setup failed: " + e.getMessage();
         }
-    }
-
-    /** The game to run: games/CUSA12392 if present, otherwise the first folder with an eboot. */
-    private static File findGame(File games) {
-        File preferred = new File(games, "CUSA12392/eboot.bin");
-        if (preferred.isFile()) {
-            return preferred;
-        }
-        File[] folders = games.listFiles();
-        if (folders != null) {
-            for (File folder : folders) {
-                File eboot = new File(folder, "eboot.bin");
-                if (eboot.isFile()) {
-                    return eboot;
-                }
-            }
-        }
-        return null;
     }
 
     // --- status panel ---------------------------------------------------------------------------
@@ -662,7 +659,13 @@ public class MainActivity extends Activity
                     break;
             }
             // Waiting is the moment to say what the game will be played with.
-            if (gamepad == null) {
+            if (moveInput) {
+                int xr = nativeXrStatus();
+                status += "\n\nTouch controllers as PS Move: left "
+                        + ((xr & 4) != 0 ? "tracked" : "not tracked") + ", right "
+                        + ((xr & 8) != 0 ? "tracked" : "not tracked")
+                        + ". Use the headset's Reset view to recenter.";
+            } else if (gamepad == null) {
                 status += "\n\nNo controller found. Switch the DualSense on (PS button); pair it "
                         + "first under Settings > Bluetooth if it never was.";
             } else {
@@ -697,7 +700,9 @@ public class MainActivity extends Activity
         String rate = statsRate;
         int xr = nativeXrStatus();
         return "Game: " + rate + " frames a second\nDisplay: " + ((xr >> 8) & 0xff) + " Hz\n"
-                + "Hands holding the controller: " + ((xr & 2) != 0 ? "seen" : "not seen");
+                + (moveInput ? "Move tracking: left " + ((xr & 4) != 0 ? "yes" : "no")
+                        + ", right " + ((xr & 8) != 0 ? "yes" : "no")
+                        : "Hands holding the controller: " + ((xr & 2) != 0 ? "seen" : "not seen"));
     }
 
     private void drawStatus(String status) {

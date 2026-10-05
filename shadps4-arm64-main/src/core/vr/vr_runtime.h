@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -60,6 +61,37 @@ struct DeviceState {
     bool tracked{};
 };
 
+/// A host sample for one tracked Touch controller. Poses and velocities use host space;
+/// no inferred gamepad position is ever used for Move. Separate velocity-valid flags let
+/// the runtime derive velocity only when consecutive real tracking samples permit it.
+struct MoveHostState {
+    DeviceState device;
+    u16 buttons{};
+    float trigger{};
+    bool connected{};
+    bool linear_velocity_valid{};
+    bool angular_velocity_valid{};
+    u64 sample_time_ns{}; ///< Shared monotonic capture time; 0 for synchronous in-process hosts.
+};
+
+struct MoveState {
+    DeviceState device;
+    u16 buttons{};
+    u16 trigger{};
+    Vec3 acceleration; ///< Device-local specific force in g, derived from tracked motion.
+    Vec3 gyro;         ///< Device-local angular velocity in radians/second.
+    u64 timestamp_us{}; ///< sceKernelGetProcessTime domain; assigned once per sample.
+    bool connected{};
+};
+
+struct MoveFeedback {
+    u8 intensity{};
+    u8 red{};
+    u8 green{};
+    u8 blue{};
+    bool operator==(const MoveFeedback&) const = default;
+};
+
 /// What a title asks of the controller: its two rumble motors and the colour of its light.
 struct PadFeedback {
     u8 small_motor{};
@@ -82,6 +114,8 @@ struct PresentedFrame {
 
 struct Config {
     bool headset_connected{false};
+    /// Explicit opt-in. Default Touch-to-gamepad and physical gamepad paths stay unchanged.
+    bool move_enabled{false};
     float ipd{0.063f};
     Fov fov{};
     /// The field of view the title is told of is the headset's own (as the host found it), not
@@ -190,6 +224,18 @@ public:
     /// takes out the drift a gyroscope has about the vertical.
     void UpdatePadYawReference(float yaw);
 
+    /// Two independent virtual Moves, index 0 left and index 1 right. Samples expire after
+    /// 250 ms without host updates; tracking loss never becomes a fabricated tracked pose.
+    bool IsMoveEnabled() const { return move_enabled.load(std::memory_order_relaxed); }
+    void UpdateMove(u32 hand, const MoveHostState& state);
+    void ReleaseMoves();
+    MoveState GetMove(u32 hand);
+    u32 ReadMoveRecent(u32 hand, u64 after, MoveState* out, u32 capacity);
+    void SetMoveVibration(u32 hand, u8 intensity);
+    void SetMoveLight(u32 hand, u8 red, u8 green, u8 blue);
+    MoveFeedback GetMoveFeedback(u32 hand);
+    void SetMoveFeedbackListener(std::function<void(u32, const MoveFeedback&)> listener);
+
     // The other direction: what the title wants the real controller to do.
     void SetPadVibration(u8 small_motor, u8 large_motor);
     void SetPadLight(u8 red, u8 green, u8 blue);
@@ -236,6 +282,23 @@ private:
     void PlaceHead();
     Vec3 PositionToTracker(const Vec3& host) const;
     Vec3 DirectionToTracker(const Vec3& host) const;
+
+    MoveState MoveToTracker(const MoveState& state) const;
+    void ExpireMoveLocked(u32 hand, std::chrono::steady_clock::time_point now);
+    struct MoveSlot {
+        MoveState latest; // Stored in host space; transformed at read time, including recenter.
+        std::array<MoveState, 32> history{};
+        u32 history_start{};
+        u32 history_count{};
+        u64 sequence{};
+        u64 source_time_ns{};
+        std::chrono::steady_clock::time_point received;
+        bool velocity_known{};
+        MoveFeedback feedback;
+    };
+    std::array<MoveSlot, 2> moves;
+    std::atomic<bool> move_enabled{};
+    std::function<void(u32, const MoveFeedback&)> move_feedback_listener;
 
     Config config;
     std::atomic<bool> headset_worn{true};

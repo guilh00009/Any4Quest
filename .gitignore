@@ -9,9 +9,11 @@
 !/README.md
 !/README-QUEST-VR.md
 !/README-PC-VR.md
+!/README-ANY4QUEST.md
 !/LICENSE
 !/THIRD-PARTY-NOTICES.md
 !/Play Astro Bot VR.bat
+!/Play Any4Quest VR.bat
 !/quest-host/
 !/shadps4-arm64-main/
 
@@ -42,3 +44,7 @@ eboot.bin
 sce_sys/
 sce_module/
 savedata/
+
+# Python test caches are generated, never source.
+__pycache__/
+*.pyc

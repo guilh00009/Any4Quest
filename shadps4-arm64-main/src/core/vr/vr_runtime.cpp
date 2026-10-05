@@ -13,6 +13,8 @@
 #include "common/logging/log.h"
 #include "common/path_util.h"
 #include "core/libraries/system/systemservice.h"
+#include "core/libraries/kernel/time.h"
+#include "core/vr/vr_move_input.h"
 #include "core/vr/vr_host_link.h"
 #include "core/vr/vr_runtime.h"
 #ifdef ENABLE_OPENXR_HOST
@@ -129,6 +131,11 @@ FileConfig LoadFileConfig() {
             config.ipd = json.value("ipd_mm", config.ipd * 1000.0f) / 1000.0f;
             config.refresh_rate = json.value("refresh_rate", config.refresh_rate);
             config.demo_motion = json.value("demo_motion", config.demo_motion);
+            const std::string input_mode = json.value("input_mode", "gamepad");
+            config.move_enabled = input_mode == "move";
+            if (input_mode != "gamepad" && input_mode != "move") {
+                LOG_WARNING(Core_Vr, "Unknown VR input mode '{}'; using gamepad", input_mode);
+            }
             if (const auto it = json.find("origin_offset");
                 it != json.end() && it->is_array() && it->size() == 3) {
                 config.origin_offset = {(*it)[0].get<float>(), (*it)[1].get<float>(),
@@ -148,6 +155,13 @@ FileConfig LoadFileConfig() {
         }
     }
 
+    if (const char* input = std::getenv("SHADPS4_VR_INPUT_MODE"); input && *input) {
+        const std::string_view mode{input};
+        result.config.move_enabled = mode == "move";
+        if (mode != "gamepad" && mode != "move") {
+            LOG_WARNING(Core_Vr, "Unknown SHADPS4_VR_INPUT_MODE '{}'; using gamepad", input);
+        }
+    }
     bool flag = false;
     if (EnvFlag("SHADPS4_VR", flag)) {
         result.mode = flag ? HeadsetMode::On : HeadsetMode::Off;
@@ -199,7 +213,11 @@ Runtime& Runtime::Instance() {
 
 void Runtime::Configure(bool psvr_supported, bool psvr_required) {
     const FileConfig file_config = LoadFileConfig();
+    ReleaseMoves();
     config = file_config.config;
+    move_enabled.store(config.move_enabled, std::memory_order_relaxed);
+    LOG_INFO(Core_Vr, "VR input profile: {}", config.move_enabled ? "two Move controllers (experimental)"
+                                                               : "gamepad (default)");
     switch (file_config.mode) {
     case HeadsetMode::On:
         config.headset_connected = true;
@@ -622,6 +640,236 @@ void Runtime::SetPadFeedbackListener(std::function<void(const PadFeedback&)> lis
     if (listener) {
         listener(feedback);
     }
+}
+
+namespace {
+bool Finite(const Vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+bool ValidOrientation(const Quat& q) {
+    const float length_squared = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    return std::isfinite(length_squared) && length_squared > 1e-8f;
+}
+Vec3 Scaled(const Vec3& v, float scale) {
+    return {v.x * scale, v.y * scale, v.z * scale};
+}
+Vec3 Difference(const Vec3& a, const Vec3& b) {
+    return {a.x - b.x, a.y - b.y, a.z - b.z};
+}
+} // namespace
+
+void Runtime::ExpireMoveLocked(u32 hand, std::chrono::steady_clock::time_point now) {
+    auto& slot = moves[hand];
+    if (slot.latest.connected && now - slot.received >= std::chrono::milliseconds{250}) {
+        slot.latest.connected = false;
+        slot.latest.device.tracked = false;
+        slot.latest.buttons = slot.latest.trigger = 0;
+        slot.latest.acceleration = slot.latest.gyro = {};
+        slot.latest.device.linear_velocity = slot.latest.device.angular_velocity = {};
+        slot.history_start = slot.history_count = 0;
+        slot.velocity_known = false;
+        slot.feedback = {};
+        LOG_INFO(Core_Vr, "Move {} disconnected: host samples expired", hand);
+    }
+}
+
+void Runtime::UpdateMove(u32 hand, const MoveHostState& host) {
+    if (hand >= moves.size() || !IsMoveEnabled()) return;
+    std::scoped_lock lock{mutex};
+    const auto now = std::chrono::steady_clock::now();
+    ExpireMoveLocked(hand, now);
+    auto& slot = moves[hand];
+    const u64 now_ns = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now.time_since_epoch()).count());
+    const u64 capture_ns = host.sample_time_ns ? host.sample_time_ns : now_ns;
+    // CLOCK_MONOTONIC is shared by the Quest host and Linux core. Never make queued old
+    // data look newly connected or differentiate motion by socket receive jitter.
+    if (capture_ns > now_ns || now_ns - capture_ns >= 250000000 ||
+        (host.sample_time_ns && slot.source_time_ns && capture_ns <= slot.source_time_ns)) return;
+    const u64 age_us = (now_ns - capture_ns) / 1000;
+    const u64 process_now = Libraries::Kernel::sceKernelGetProcessTime();
+    const u64 capture_us = process_now > age_us ? process_now - age_us : 1;
+    MoveState sample{};
+    sample.connected = host.connected;
+    sample.timestamp_us = std::max(capture_us, slot.latest.timestamp_us + 1);
+    sample.device.sequence = ++slot.sequence;
+    const bool tracked = host.connected && host.device.tracked &&
+                         Finite(host.device.pose.position) &&
+                         ValidOrientation(host.device.pose.orientation);
+    if (host.connected) {
+        sample.buttons = host.buttons & (MoveInput::AllButtons & ~MoveInput::Trigger);
+        sample.trigger = MoveInput::TriggerToByte(host.trigger);
+        if (sample.trigger > 12) sample.buttons |= MoveInput::Trigger;
+    }
+    if (tracked) {
+        sample.device.pose = host.device.pose;
+        sample.device.pose.orientation = Normalize(host.device.pose.orientation);
+        sample.device.tracked = true;
+        const auto& previous = slot.latest;
+        const double elapsed = sample.timestamp_us > previous.timestamp_us
+                                   ? (sample.timestamp_us - previous.timestamp_us) / 1000000.0
+                                   : 0.0;
+        // Avoid tiny intervals, gaps and tracking reacquisition producing enormous derivatives.
+        const bool consecutive = previous.connected && previous.device.tracked &&
+                                 elapsed >= 0.002 && elapsed <= 0.1;
+        bool velocity_known = host.linear_velocity_valid && Finite(host.device.linear_velocity);
+        if (velocity_known) {
+            sample.device.linear_velocity = host.device.linear_velocity;
+        } else if (consecutive) {
+            sample.device.linear_velocity = Scaled(
+                Difference(sample.device.pose.position, previous.device.pose.position), 1.0f / elapsed);
+            velocity_known = true;
+        }
+        if (host.angular_velocity_valid && Finite(host.device.angular_velocity)) {
+            sample.device.angular_velocity = host.device.angular_velocity;
+        } else if (consecutive) {
+            // q_now * inverse(q_before) is a world-space rotation. q and -q are identical;
+            // choose the short arc so quaternion sign changes do not create angular spikes.
+            Quat delta = Normalize(Multiply(sample.device.pose.orientation,
+                                            Conjugate(previous.device.pose.orientation)));
+            if (delta.w < 0.0f) delta = {-delta.x, -delta.y, -delta.z, -delta.w};
+            const float sine = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+            if (sine > 1e-6f) {
+                sample.device.angular_velocity = Scaled({delta.x, delta.y, delta.z},
+                    2.0f * std::atan2(sine, delta.w) / (sine * elapsed));
+            }
+        }
+        Vec3 acceleration{};
+        if (consecutive && velocity_known && slot.velocity_known) {
+            acceleration = Scaled(Difference(sample.device.linear_velocity,
+                                              previous.device.linear_velocity), 1.0f / elapsed);
+        }
+        // OpenXR exposes pose/velocity, not the controller's raw IMU. Synthesize specific
+        // force from tracked velocity and gravity, in the same local frame as the grip pose.
+        constexpr float Gravity = 9.80665f;
+        acceleration.y += Gravity;
+        sample.acceleration = Scaled(Rotate(Conjugate(sample.device.pose.orientation), acceleration),
+                                     1.0f / Gravity);
+        sample.gyro = Rotate(Conjugate(sample.device.pose.orientation), sample.device.angular_velocity);
+        slot.velocity_known = velocity_known;
+    } else {
+        slot.velocity_known = false;
+        // A controller outside tracking still supplies buttons, but never retains a motor
+        // command that could unexpectedly resume when tracking is reacquired.
+        slot.feedback.intensity = 0;
+    }
+    if (slot.latest.connected != sample.connected) {
+        LOG_INFO(Core_Vr, "Move {} {}", hand, sample.connected ? "connected" : "disconnected");
+    }
+    if (!sample.connected) {
+        slot.history_start = slot.history_count = 0;
+        slot.feedback = {};
+    } else {
+        if (slot.history_count == slot.history.size()) {
+            slot.history_start = (slot.history_start + 1) % slot.history.size();
+            --slot.history_count;
+        }
+        slot.history[(slot.history_start + slot.history_count) % slot.history.size()] = sample;
+        ++slot.history_count;
+    }
+    slot.latest = sample;
+    slot.source_time_ns = capture_ns;
+    slot.received = now - std::chrono::nanoseconds{now_ns - capture_ns};
+}
+
+MoveState Runtime::MoveToTracker(const MoveState& state) const {
+    MoveState result = state;
+    if (result.device.tracked) {
+        result.device.pose.position = PositionToTracker(state.device.pose.position);
+        result.device.pose.orientation = Normalize(Multiply(Conjugate(seat_yaw), state.device.pose.orientation));
+        result.device.linear_velocity = DirectionToTracker(state.device.linear_velocity);
+        result.device.angular_velocity = DirectionToTracker(state.device.angular_velocity);
+    }
+    return result;
+}
+
+MoveState Runtime::GetMove(u32 hand) {
+    if (hand >= moves.size() || !IsMoveEnabled()) return {};
+    std::scoped_lock lock{mutex};
+    ExpireMoveLocked(hand, std::chrono::steady_clock::now());
+    return MoveToTracker(moves[hand].latest);
+}
+
+u32 Runtime::ReadMoveRecent(u32 hand, u64 after, MoveState* out, u32 capacity) {
+    if (hand >= moves.size() || !out || !capacity || !IsMoveEnabled()) return 0;
+    std::scoped_lock lock{mutex};
+    ExpireMoveLocked(hand, std::chrono::steady_clock::now());
+    const auto& slot = moves[hand];
+    if (!slot.latest.connected) return 0;
+    u32 count = 0;
+    for (u32 i = 0; i < slot.history_count && count < capacity; ++i) {
+        const auto& sample = slot.history[(slot.history_start + i) % slot.history.size()];
+        if (sample.timestamp_us > after) out[count++] = MoveToTracker(sample);
+    }
+    return count;
+}
+
+void Runtime::ReleaseMoves() {
+    std::function<void(u32, const MoveFeedback&)> listener;
+    {
+        std::scoped_lock lock{mutex};
+        for (auto& slot : moves) {
+            const auto sequence = slot.sequence;
+            const auto timestamp = slot.latest.timestamp_us;
+            slot = {};
+            slot.sequence = sequence;
+            slot.latest.timestamp_us = timestamp;
+        }
+        listener = move_feedback_listener;
+    }
+    if (listener) for (u32 hand = 0; hand < moves.size(); ++hand) listener(hand, {});
+}
+
+void Runtime::SetMoveVibration(u32 hand, u8 intensity) {
+    if (hand >= moves.size() || !IsMoveEnabled()) return;
+    MoveFeedback feedback;
+    std::function<void(u32, const MoveFeedback&)> listener;
+    {
+        std::scoped_lock lock{mutex};
+        ExpireMoveLocked(hand, std::chrono::steady_clock::now());
+        auto& slot = moves[hand];
+        slot.feedback.intensity = slot.latest.connected && slot.latest.device.tracked ? intensity : 0;
+        feedback = slot.feedback;
+        listener = move_feedback_listener;
+    }
+    if (listener) listener(hand, feedback);
+}
+
+void Runtime::SetMoveLight(u32 hand, u8 red, u8 green, u8 blue) {
+    if (hand >= moves.size() || !IsMoveEnabled()) return;
+    MoveFeedback feedback;
+    std::function<void(u32, const MoveFeedback&)> listener;
+    {
+        std::scoped_lock lock{mutex};
+        ExpireMoveLocked(hand, std::chrono::steady_clock::now());
+        auto& slot = moves[hand];
+        slot.feedback.red = red;
+        slot.feedback.green = green;
+        slot.feedback.blue = blue;
+        feedback = slot.feedback;
+        listener = move_feedback_listener;
+    }
+    if (listener) listener(hand, feedback);
+}
+
+MoveFeedback Runtime::GetMoveFeedback(u32 hand) {
+    if (hand >= moves.size() || !IsMoveEnabled()) return {};
+    std::scoped_lock lock{mutex};
+    ExpireMoveLocked(hand, std::chrono::steady_clock::now());
+    return moves[hand].latest.connected ? moves[hand].feedback : MoveFeedback{};
+}
+
+void Runtime::SetMoveFeedbackListener(std::function<void(u32, const MoveFeedback&)> listener) {
+    std::array<MoveFeedback, 2> feedback;
+    {
+        std::scoped_lock lock{mutex};
+        move_feedback_listener = listener;
+        for (u32 hand = 0; hand < moves.size(); ++hand) {
+            ExpireMoveLocked(hand, std::chrono::steady_clock::now());
+            feedback[hand] = moves[hand].latest.connected ? moves[hand].feedback : MoveFeedback{};
+        }
+    }
+    if (listener) for (u32 hand = 0; hand < moves.size(); ++hand) listener(hand, feedback[hand]);
 }
 
 void Runtime::UpdateOptics(const Fov& fov, float ipd) {

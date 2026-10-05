@@ -43,6 +43,7 @@ public:
 
     bool SendFrame(const Protocol::Frame& frame);
     bool SendPadFeedback(const Protocol::PadFeedback& feedback);
+    bool SendMoveFeedback(const Protocol::MoveFeedback& feedback);
 
 private:
     HostLink() = default;

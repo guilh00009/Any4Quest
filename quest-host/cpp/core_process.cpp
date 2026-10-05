@@ -1095,6 +1095,18 @@ void CoreProcess::SendRefresh(float rate) {
     }
 }
 
+void CoreProcess::SendMoveState(const Protocol::MoveState& state) {
+    const int fd = vr_fd;
+    if (fd >= 0) {
+        ::send(fd, &state, sizeof(state), MSG_NOSIGNAL | MSG_DONTWAIT);
+    }
+}
+
+std::optional<CoreProcess::MoveFeedbackSample> CoreProcess::GetMoveFeedback(uint32_t hand) {
+    std::scoped_lock lock{mutex};
+    return hand < move_feedback.size() ? move_feedback[hand] : std::nullopt;
+}
+
 std::optional<Protocol::Frame> CoreProcess::TakeFrame() {
     std::scoped_lock lock{mutex};
     std::optional<Protocol::Frame> result;
@@ -1112,6 +1124,7 @@ void CoreProcess::VrLoop() {
     {
         std::scoped_lock lock{mutex};
         vr_fd = fd;
+        move_feedback = {};
         SendBuffersLocked();
     }
 
@@ -1128,12 +1141,16 @@ void CoreProcess::VrLoop() {
             Protocol::Header header;
             Protocol::Frame frame;
             Protocol::PadFeedback feedback;
+            Protocol::MoveFeedback move;
         } received{};
-        const ssize_t size = ::recv(fd, &received, sizeof(received), 0);
+        // MSG_TRUNC returns the original packet length, so an oversized packet cannot be
+        // mistaken for a valid packet after recv discards its tail (SOCK_SEQPACKET).
+        const ssize_t size = ::recv(fd, &received, sizeof(received), MSG_TRUNC);
         if (size == 0 || (size < 0 && errno != EINTR)) {
             break;
         }
         if (size < static_cast<ssize_t>(sizeof(Protocol::Header)) ||
+            size > static_cast<ssize_t>(sizeof(received)) ||
             received.header.magic != Protocol::Magic) {
             continue;
         }
@@ -1147,9 +1164,20 @@ void CoreProcess::VrLoop() {
             pad_feedback = uint64_t{feedback.small_motor} | uint64_t{feedback.large_motor} << 8 |
                            uint64_t{feedback.red} << 16 | uint64_t{feedback.green} << 24 |
                            uint64_t{feedback.blue} << 32;
+        } else if (received.header.type == Protocol::MessageType::MoveFeedback &&
+                   size == static_cast<ssize_t>(sizeof(Protocol::MoveFeedback)) &&
+                   received.move.version == Protocol::MoveFeedback::Version &&
+                   received.move.hand < move_feedback.size()) {
+            std::scoped_lock lock{mutex};
+            move_feedback[received.move.hand] =
+                MoveFeedbackSample{received.move, std::chrono::steady_clock::now()};
         }
     }
 
     vr_fd = -1;
+    {
+        std::scoped_lock lock{mutex};
+        move_feedback = {};
+    }
     ::close(fd);
 }

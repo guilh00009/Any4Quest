@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
 #include "common/logging/log.h"
 #include "common/thread.h"
 #include "core/vr/vr_host_link.h"
+#include "core/vr/vr_move_input.h"
 #include "core/vr/vr_runtime.h"
 
 #ifndef _WIN32
@@ -42,6 +44,10 @@ bool HostLink::SendFrame(const Protocol::Frame&) {
 }
 
 bool HostLink::SendPadFeedback(const Protocol::PadFeedback&) {
+    return false;
+}
+
+bool HostLink::SendMoveFeedback(const Protocol::MoveFeedback&) {
     return false;
 }
 
@@ -94,6 +100,15 @@ bool HostLink::Start() {
         message.blue = feedback.blue;
         SendPadFeedback(message);
     });
+    Runtime::Instance().SetMoveFeedbackListener([this](u32 hand, const MoveFeedback& feedback) {
+        Protocol::MoveFeedback message;
+        message.hand = hand;
+        message.intensity = feedback.intensity;
+        message.red = feedback.red;
+        message.green = feedback.green;
+        message.blue = feedback.blue;
+        SendMoveFeedback(message);
+    });
     return true;
 }
 
@@ -119,6 +134,15 @@ bool HostLink::SendPadFeedback(const Protocol::PadFeedback& feedback) {
            static_cast<ssize_t>(sizeof(feedback));
 }
 
+bool HostLink::SendMoveFeedback(const Protocol::MoveFeedback& feedback) {
+    if (!IsConnected()) {
+        return false;
+    }
+    std::scoped_lock lock{send_mutex};
+    return ::send(fd, &feedback, sizeof(feedback), MSG_NOSIGNAL | MSG_DONTWAIT) ==
+           static_cast<ssize_t>(sizeof(feedback));
+}
+
 void HostLink::ReadLoop() {
     Common::SetCurrentThreadName("shadPS4:VrHostLink");
     auto& runtime = Runtime::Instance();
@@ -130,6 +154,7 @@ void HostLink::ReadLoop() {
         Protocol::Optics optics;
         Protocol::PadPose pad_pose;
         Protocol::Refresh refresh;
+        Protocol::MoveState move;
     };
 
     while (true) {
@@ -175,13 +200,79 @@ void HostLink::ReadLoop() {
             }
         };
 
-        if (size < static_cast<ssize_t>(sizeof(Protocol::Header)) ||
+        if ((header.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0 ||
+            size < static_cast<ssize_t>(sizeof(Protocol::Header)) ||
             message.header.magic != Protocol::Magic) {
             drop_fds();
             continue;
         }
 
         switch (message.header.type) {
+        case Protocol::MessageType::MoveState: {
+            const auto& move = message.move;
+            if (size != static_cast<ssize_t>(sizeof(Protocol::MoveState)) ||
+                move.version != Protocol::MoveState::Version || move.hand >= 2 ||
+                (move.flags & ~Protocol::MoveState::ValidFlags) != 0 || num_fds != 0 ||
+                move.sample_time_ns == 0 ||
+                (move.buttons & ~u32{MoveInput::AllButtons}) != 0 ||
+                !std::isfinite(move.trigger) || move.trigger < 0.0f || move.trigger > 1.0f) {
+                break;
+            }
+            const bool connected = (move.flags & Protocol::MoveState::Connected) != 0;
+            const bool tracked = (move.flags & Protocol::MoveState::Tracked) != 0;
+            // Velocity has meaning only with a tracked, connected pose.
+            if ((!connected && move.flags != 0) ||
+                (!tracked && (move.flags & (Protocol::MoveState::LinearVelocityValid |
+                                            Protocol::MoveState::AngularVelocityValid)) != 0)) {
+                break;
+            }
+            const auto finite = [](const auto& values) {
+                for (const float value : values) {
+                    if (!std::isfinite(value)) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            if (!finite(move.position) || !finite(move.orientation) ||
+                !finite(move.linear_velocity) || !finite(move.angular_velocity)) {
+                break;
+            }
+            MoveHostState state;
+            state.connected = connected;
+            state.device.tracked = tracked;
+            state.buttons = static_cast<u16>(move.buttons);
+            state.trigger = move.trigger;
+            state.sample_time_ns = move.sample_time_ns;
+            state.device.pose.position = {move.position[0], move.position[1], move.position[2]};
+            // Runtime validates and normalizes a full pose before storing it.
+            state.device.pose.orientation = {move.orientation[0], move.orientation[1],
+                                             move.orientation[2], move.orientation[3]};
+            state.linear_velocity_valid =
+                (move.flags & Protocol::MoveState::LinearVelocityValid) != 0;
+            state.angular_velocity_valid =
+                (move.flags & Protocol::MoveState::AngularVelocityValid) != 0;
+            if (state.linear_velocity_valid) {
+                state.device.linear_velocity = {move.linear_velocity[0], move.linear_velocity[1],
+                                                move.linear_velocity[2]};
+            }
+            if (state.angular_velocity_valid) {
+                state.device.angular_velocity = {move.angular_velocity[0], move.angular_velocity[1],
+                                                 move.angular_velocity[2]};
+            }
+            runtime.UpdateMove(move.hand, state);
+            // Renew the host's bounded vibration lease while input/transport is alive.
+            // Games need not keep repeating an unchanged SetVibration call.
+            const auto feedback = runtime.GetMoveFeedback(move.hand);
+            Protocol::MoveFeedback reply;
+            reply.hand = move.hand;
+            reply.intensity = feedback.intensity;
+            reply.red = feedback.red;
+            reply.green = feedback.green;
+            reply.blue = feedback.blue;
+            SendMoveFeedback(reply);
+            break;
+        }
         case Protocol::MessageType::Pose: {
             if (size < static_cast<ssize_t>(sizeof(Protocol::Pose))) {
                 break;
@@ -292,6 +383,12 @@ void HostLink::ReadLoop() {
 
     LOG_WARNING(Core_Vr, "The VR host closed the connection");
     connected = false;
+    runtime.ReleaseMoves();
+    {
+        std::scoped_lock lock{send_mutex};
+        ::close(fd);
+        fd = -1;
+    }
     buffers_cv.notify_all();
 }
 

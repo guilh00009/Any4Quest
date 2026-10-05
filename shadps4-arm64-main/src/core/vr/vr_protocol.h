@@ -24,6 +24,8 @@ enum class MessageType : std::uint32_t {
     PadPose = 5,
     PadFeedback = 6,
     Refresh = 7,
+    MoveState = 8,
+    MoveFeedback = 9,
 };
 
 struct Header {
@@ -134,5 +136,45 @@ struct PadFeedback {
     std::uint8_t blue{};
     std::uint8_t reserved[3]{};
 };
+
+/// Host to emulator: one Touch controller presented as one PS Move. Versioned separately
+/// so older hosts/emulators ignore these additive messages without changing gamepad packets.
+/// Both processes must be rebuilt for Move mode. Hand identity is fixed: 0 left, 1 right.
+struct MoveState {
+    static constexpr std::uint32_t Version = 1;
+    static constexpr std::uint32_t Connected = 1u << 0;
+    static constexpr std::uint32_t Tracked = 1u << 1;
+    static constexpr std::uint32_t LinearVelocityValid = 1u << 2;
+    static constexpr std::uint32_t AngularVelocityValid = 1u << 3;
+    static constexpr std::uint32_t ValidFlags = Connected | Tracked | LinearVelocityValid |
+                                                AngularVelocityValid;
+    Header header{.type = MessageType::MoveState};
+    std::uint32_t version{Version};
+    std::uint32_t hand{};
+    std::uint32_t flags{};
+    std::uint32_t buttons{}; ///< Compact Move button bits, not raw USB/HID button bits.
+    float trigger{};         ///< 0..1; converted to 0..255 by the emulator.
+    float position[3]{};     ///< Grip origin, metres, in the same space as Pose.
+    float orientation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    float linear_velocity[3]{};
+    float angular_velocity[3]{};
+    /// Capture time on shared CLOCK_MONOTONIC, nanoseconds; not predicted display time.
+    std::uint64_t sample_time_ns{};
+};
+
+/// Emulator to host: independent haptics for each Move. Touch has no controllable light
+/// sphere, so RGB is retained as virtual device state, not represented as physical output.
+struct MoveFeedback {
+    static constexpr std::uint32_t Version = 1;
+    Header header{.type = MessageType::MoveFeedback};
+    std::uint32_t version{Version};
+    std::uint32_t hand{};
+    std::uint8_t intensity{};
+    std::uint8_t red{};
+    std::uint8_t green{};
+    std::uint8_t blue{};
+};
+static_assert(sizeof(MoveState) == 88);
+static_assert(sizeof(MoveFeedback) == 20);
 
 } // namespace Core::Vr::Protocol

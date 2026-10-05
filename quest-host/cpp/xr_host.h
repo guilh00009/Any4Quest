@@ -30,6 +30,9 @@ struct XrHostOptions {
     /// Use the wearer's hands, as the headset sees them around the gamepad, to place the
     /// controller in the game.
     bool track_hands{true};
+    /// Explicit opt-in: expose left/right Touch grip actions as two PS Move devices.
+    bool move_input{};
+    bool move_rumble{true};
     /// What the compositor does to the game's picture, which is coarser than the display, on
     /// top of showing it: 0 and 1 nothing (with 1 the emulator sharpens the picture itself,
     /// which is not this struct's business), 2 its Super Resolution filter on every refresh,
@@ -78,6 +81,7 @@ inline constexpr uint32_t Seat = 2;
 struct XrHostStatus {
     std::atomic<bool> session_running{};
     std::atomic<bool> hands_tracked{};
+    std::atomic<uint32_t> move_tracked_mask{};
     std::atomic<float> refresh_rate{};
 };
 

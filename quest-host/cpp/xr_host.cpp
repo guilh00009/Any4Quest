@@ -27,6 +27,7 @@
 
 #include "core_process.h"
 #include "log.h"
+#include "move_controllers.h"
 
 namespace Protocol = Core::Vr::Protocol;
 
@@ -164,7 +165,8 @@ private:
             options.cubic && enable_if_present(XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME) &&
             enable_if_present(XR_FB_SWAPCHAIN_UPDATE_STATE_OPENGL_ES_EXTENSION_NAME);
         has_hand_tracking =
-            options.track_hands && enable_if_present(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+            !options.move_input && options.track_hands &&
+            enable_if_present(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
         has_layer_resolution =
             options.dynamic_resolution &&
             enable_if_present(XR_META_RECOMMENDED_LAYER_RESOLUTION_EXTENSION_NAME);
@@ -247,6 +249,9 @@ private:
 
         if (has_hand_tracking) {
             CreateHandTrackers();
+        }
+        if (options.move_input && !move_controllers.Initialize(instance, session, local_space)) {
+            return false;
         }
         if (has_metrics) {
             FindMetrics();
@@ -437,6 +442,10 @@ private:
                 const auto& changed =
                     *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
                 LOGI("session state: %s", SessionStateName(changed.state));
+                session_focused = changed.state == XR_SESSION_STATE_FOCUSED;
+                if (options.move_input && !session_focused) {
+                    ReleaseMoves();
+                }
                 switch (changed.state) {
                 case XR_SESSION_STATE_READY: {
                     XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
@@ -465,6 +474,8 @@ private:
                     break;
                 }
             } else if (event.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
+                session_focused = false;
+                if (options.move_input) ReleaseMoves();
                 exit_requested = true;
             } else if (event.type == XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT) {
                 // The system saying that the headset runs hot or cannot keep up: levels are
@@ -912,6 +923,7 @@ private:
             if (const XrResult waited = xrWaitFrame(session, nullptr, &frame_state);
                 XR_FAILED(waited)) {
                 NoteFrameFailure("xrWaitFrame", waited);
+                if (options.move_input) ReleaseMoves();
                 usleep(5'000);
                 continue;
             }
@@ -922,6 +934,7 @@ private:
             }
             if (const XrResult begun = xrBeginFrame(session, nullptr); XR_FAILED(begun)) {
                 NoteFrameFailure("xrBeginFrame", begun);
+                if (options.move_input) ReleaseMoves();
                 continue;
             }
 
@@ -930,6 +943,23 @@ private:
                 static_cast<XrTime>(std::clamp(options.predict_ms, 0.0f, 80.0f) * 1e6f);
             SendHeadPose(pose_time);
             SendPadPose(pose_time);
+            if (options.move_input) {
+                uint32_t tracked_mask = 0;
+                move_controllers.Update(
+                    pose_time, session_focused,
+                    [this, &tracked_mask](const Protocol::MoveState& state) {
+                        if ((state.flags & Protocol::MoveState::Tracked) != 0) {
+                            tracked_mask |= 1u << state.hand;
+                        }
+                        core.SendMoveState(state);
+                    },
+                    [this](uint32_t hand) -> std::optional<MoveControllers::Feedback> {
+                        const auto feedback = core.GetMoveFeedback(hand);
+                        if (!feedback || !options.move_rumble) return std::nullopt;
+                        return MoveControllers::Feedback{feedback->message, feedback->received};
+                    });
+                host_status.move_tracked_mask = tracked_mask;
+            }
             UpdateLayerSize(frame_state.predictedDisplayTime);
 
             const auto now = std::chrono::steady_clock::now();
@@ -1177,6 +1207,9 @@ private:
         // moment it says, the head is where it rests, and the emulator has to hear of it.
         const bool system_reset = space_change_time != 0 && display_time >= space_change_time;
         if (system_reset) {
+            // The pose coordinate system jumps at changeTime. Clear derivatives only when
+            // that time is reached, immediately before sending the first new-space sample.
+            if (options.move_input) ReleaseMoves();
             space_change_time = 0;
         }
         if ((requests & XrRecenter::Seat) != 0 || system_reset) {
@@ -1312,6 +1345,10 @@ private:
     }
 
     void Shutdown() {
+        if (options.move_input) {
+            ReleaseMoves();
+            move_controllers.Destroy();
+        }
         frames.Destroy(gl.display);
         blitter.Destroy();
         if (instance != XR_NULL_HANDLE) {
@@ -1353,6 +1390,13 @@ private:
     std::atomic<uint32_t>& recenter_requests;
 
     GlContext gl;
+    MoveControllers move_controllers;
+
+    void ReleaseMoves() {
+        host_status.move_tracked_mask = 0;
+        move_controllers.Release(
+            [this](const Protocol::MoveState& state) { core.SendMoveState(state); });
+    }
 
     XrInstance instance{XR_NULL_HANDLE};
     XrSystemId system{XR_NULL_SYSTEM_ID};
@@ -1372,6 +1416,7 @@ private:
     bool has_metrics{};
     bool has_time_conversion{};
     bool session_running{};
+    bool session_focused{};
     bool exit_requested{};
     bool probed{};
     uint32_t frame_failures{};
