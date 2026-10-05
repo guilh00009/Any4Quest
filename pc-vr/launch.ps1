@@ -7,7 +7,7 @@ param([string]$SettingsFile = "", [switch]$NoMenu,
 $ErrorActionPreference = "Continue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Split-Path -Parent $here
-$launcherName = if ($LauncherProfile -eq "any") { "Any4Quest VR" } else { "Astro Bot VR" }
+$launcherName = if ($LauncherProfile -eq "any") { "Any4Quest VR" } else { "Any4Quest Gamepad" }
 Set-Location $here
 if ($SettingsFile -eq "") { $SettingsFile = Join-Path $here "settings.txt" }
 
@@ -332,7 +332,7 @@ function Expand-Package($package) {
         if ([System.IO.File]::Exists($candidate)) { $tool = $candidate; break }
     }
     if ($null -eq $tool) {
-        [void](Show-Box ("The game is here as a package:`n" + $package.FullName + "`n`nbut PkgTool, which unpacks packages, is missing from`n" + (Join-Path $here "pkgtool") + "`n`nUnzip the whole AstroQuest package again.") "OK" "Warning")
+        [void](Show-Box ("The game is here as a package:`n" + $package.FullName + "`n`nbut PkgTool, which unpacks packages, is missing from`n" + (Join-Path $here "pkgtool") + "`n`nUnzip the whole Any4Quest package again.") "OK" "Warning")
         return $null
     }
     $serial = "game"
@@ -343,7 +343,7 @@ function Expand-Package($package) {
         return $null
     }
     if ($serial -eq $madeFor -and $target.Length + 1 + $longestInside -gt 259) {
-        [void](Show-Box ("The game cannot be unpacked into`n" + $target + "`n`nThat path is too long: some of the game's files would have a path of more than 259 characters, which the emulator cannot open. Move the AstroQuest folder somewhere with a shorter path, for example C:\Games\AstroQuest, and start again.") "OK" "Warning")
+        [void](Show-Box ("The game cannot be unpacked into`n" + $target + "`n`nThat path is too long: some of the game's files would have a path of more than 259 characters, which the emulator cannot open. Move the Any4Quest folder somewhere with a shorter path, for example C:\Games\Any4Quest, and start again.") "OK" "Warning")
         return $null
     }
     # Estimate based on Astro's dump; other games can require substantially more space.
@@ -352,7 +352,7 @@ function Expand-Package($package) {
     $free = -1
     try { $free = (New-Object System.IO.DriveInfo($drive)).AvailableFreeSpace } catch {}
     if ($free -ge 0 -and $free -lt $needed) {
-        [void](Show-Box ("Unpacking the game takes about " + (Gigabytes $needed) + ", and drive " + $drive + " has " + (Gigabytes $free) + " free.`n`nMake room, or move the AstroQuest folder to a drive that has it.") "OK" "Warning")
+        [void](Show-Box ("Unpacking the game takes about " + (Gigabytes $needed) + ", and drive " + $drive + " has " + (Gigabytes $free) + " free.`n`nMake room, or move the Any4Quest folder to a drive that has it.") "OK" "Warning")
         return $null
     }
     $answer = Show-Box ("The game is here as a package:`n`n" + $package.Name + "   (" + (Gigabytes $package.Length) + ")`n`nIt has to be unpacked before it can be played. That is done once, takes a minute or a few, and about " + (Gigabytes $needed) + " in`n" + $target + "`n`nThis is a space estimate, not a guarantee for other games. Use a base-game dump, not an update package.`n`nUnpack it now?") "YesNo" "Question"
@@ -850,11 +850,11 @@ function Get-LaunchSummary($info) {
 
 $emulator = Join-Path $here "shadps4.exe"
 if (-not [System.IO.File]::Exists($emulator)) {
-    [void](Show-Box ("The emulator, shadps4.exe, is missing from`n" + $here + "`n`nUnzip the whole AstroQuest package again. (Built from the source: run tools/make-pc-vr.sh.)") "OK" "Error")
+    [void](Show-Box ("The emulator, shadps4.exe, is missing from`n" + $here + "`n`nUnzip the whole Any4Quest package again. (Built from the source: see README.md, Building.)") "OK" "Error")
     exit 1
 }
 if (-not (Test-Runtime)) {
-    $answer = Show-Box "The emulator needs the Microsoft Visual C++ runtime, which is not installed on this PC.`n`nDownload its installer from Microsoft now? Run it, then start Play Astro Bot VR again." "YesNo" "Warning"
+    $answer = Show-Box "The emulator needs the Microsoft Visual C++ runtime, which is not installed on this PC.`n`nDownload its installer from Microsoft now? Run it, then start Play Any4Quest VR again." "YesNo" "Warning"
     if ($answer -eq "Yes") { Start-Process "https://aka.ms/vs/17/release/vc_redist.x64.exe" }
     exit 1
 }
@@ -868,7 +868,7 @@ if ($info.Count -eq 0) {
 } elseif (-not (Test-AstroProfile $info)) {
     Say "Experimental title/version: Astro-specific resolution, time-step and frame-pacing settings are disabled. Launching does not establish compatibility." "Yellow"
 } elseif ([System.IO.Path]::GetDirectoryName($game).Length + 1 + $longestInside -gt 259) {
-    [void](Show-Box ("The game is in`n" + [System.IO.Path]::GetDirectoryName($game) + "`n`nThat path is too long: some of the game's files have a path of more than 259 characters there, which the emulator cannot open, and the game would stop when it needs them. Move the folder somewhere with a shorter path, for example C:\Games\AstroQuest, and start again.") "OK" "Warning")
+    [void](Show-Box ("The game is in`n" + [System.IO.Path]::GetDirectoryName($game) + "`n`nThat path is too long: some of the game's files have a path of more than 259 characters there, which the emulator cannot open, and the game would stop when it needs them. Move the folder somewhere with a shorter path, for example C:\Games\Any4Quest, and start again.") "OK" "Warning")
     exit 1
 }
 

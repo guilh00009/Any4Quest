@@ -4,8 +4,8 @@
 """Run source-extraction tests for the PC OpenXR Move input path.
 
 From the repository root:
-    python3 tools/tests/test_pc_move_host.py
-    python3 tools/tests/test_pc_move_host.py --sanitize \
+    python3 AI_Debug/tests/test_pc_move_host.py
+    python3 AI_Debug/tests/test_pc_move_host.py --sanitize \
         --check-legacy-against 8431e43a9a2a26e716b35e944611254d65f8d84f
 
 Requires Python 3 and a C++20 compiler (CXX, --cxx, or c++). No Windows SDK,

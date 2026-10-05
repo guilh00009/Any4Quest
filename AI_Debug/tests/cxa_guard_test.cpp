@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Build with libc_internal_cxa.cpp and tools/tests/cxa_stubs first on the include path.
+// Build with libc_internal_cxa.cpp and AI_Debug/tests/cxa_stubs first on the include path.
 #include <atomic>
 #include <barrier>
 #include <cstdio>

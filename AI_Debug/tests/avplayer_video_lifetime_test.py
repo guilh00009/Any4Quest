@@ -20,6 +20,6 @@ with tempfile.TemporaryDirectory(prefix='avplayer-frame-lifetime-') as tmp:
     cpp=Path(tmp)/'test.cpp'; exe=Path(tmp)/('test.exe' if os.name=='nt' else 'test')
     cpp.write_text(fixture.replace('// PRODUCTION_METHODS',methods))
     subprocess.run([a.cxx,'-std=c++23','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
-                    '-I'+str(r/'tools/tests/any4quest_stubs'),
+                    '-I'+str(r/'AI_Debug/tests/any4quest_stubs'),
                     '-I'+str(r/'shadps4-arm64-main/src'),str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)

@@ -1,4 +1,4 @@
-﻿# Settings for "Play Astro Bot VR.bat" and "Play Any4Quest VR.bat", one key=value a line. Lines starting with # are ignored;
+﻿# Settings for "Play Any4Quest Gamepad.bat" and "Play Any4Quest VR.bat", one key=value a line. Lines starting with # are ignored;
 # what is commented out below shows the value that applies when the line is left out.
 
 # The window at the start (menu=0 to go without it) sets input_mode and fov; for the

@@ -1,5 +1,5 @@
 # Asset-free tests: load launcher functions through the PowerShell parser, not its Windows UI.
-# Windows: powershell -NoProfile -ExecutionPolicy Bypass -File tools/tests/launcher-test.ps1
+# Windows: powershell -NoProfile -ExecutionPolicy Bypass -File AI_Debug/tests/launcher-test.ps1
 # Also runs with pwsh on other platforms. No actual game, emulator, headset or PkgTool needed.
 $ErrorActionPreference = "Stop"
 $top = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)

@@ -57,5 +57,5 @@ Tested executable SHA256:
 814BB69D5261F027B6D48B603B0CEA943426B5F65A25C3E2E411E6A05DC652BA
 Prior mono binary retained at task-2/shadps4-mono-preview-verified.exe.
 Current user baseline is main 2de834fabe72a0cca5f8542a1c55dc7028763a05.
-This increment modifies 8 source files and adds tools/tests/wide_near_stereo_test.cpp.
+This increment modifies 8 source files and adds AI_Debug/tests/wide_near_stereo_test.cpp.
 No staging, commit, push, release, install, or game-file upload performed.

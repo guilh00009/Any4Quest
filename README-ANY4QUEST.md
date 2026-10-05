@@ -1,3 +1,5 @@
+> **PCVR first:** The inherited AstroQuest Quest standalone/Android version has not been updated with current Any4Quest PCVR improvements. Standalone updates are deferred until after the PCVR work; PCVR remains incomplete. PCVR test results do not establish standalone compatibility.
+
 # Any4Quest: experimental multi-game and PS Move foundation
 
 This source adds an explicit dual-Move input path and a multi-game PC launcher to the
@@ -6,7 +8,7 @@ compatibility foundation, **not universal PSVR game support**. Opening a game's 
 recognizing its title, or exposing two Move controllers does not establish that it boots,
 renders correctly, or is playable.
 
-The established Astro path remains available through **Play Astro Bot VR.bat**, with
+The established Astro path remains available through **Play Any4Quest Gamepad.bat**, with
 `input_mode=gamepad` as the default. Its existing DualSense/gamepad and Touch-to-gamepad
 fallback behavior is preserved. Use [README-PC-VR.md](README-PC-VR.md) for that workflow and
 [README-QUEST-VR.md](README-QUEST-VR.md) for the original standalone build workflow. Those
@@ -23,9 +25,9 @@ this extension.
 - The standalone Quest host has a corresponding experimental controller transport path.
   Existing Quest 3/3S build targets remain separate from PC VR. **Standalone Quest 2 build
   support or acceptable performance is not claimed**
-- No headset, Windows launcher UI, full game session, or new APK/Windows emulator build was
-  hardware-validated for this change. Source-level and isolated runtime checks are useful,
-  but cannot substitute for those tests
+- Windows emulator builds and limited desktop gameplay have since been validated; see
+  the current [tested-games matrix](README.md#tested-games). Full completion, a new Android
+  build and a complete physical Quest 2/3/3S controller matrix remain unverified.
 
 Use only games you own and are licensed to use, dumped locally from your own copies. This
 repository and its tests do not contain games, game assets, console firmware, decryption
@@ -35,7 +37,7 @@ packages. Package support is for your existing unencrypted local dumps.
 ## PC launch and explicit input profiles
 
 1. Build the updated Windows emulator and prepare `pc-vr/shadps4.exe` using the existing
-   build workflow (`tools/make-pc-vr.sh`). An older downloaded emulator does not acquire Move
+   build workflow in [README.md](README.md#building). An older downloaded emulator does not acquire Move
    support merely by using the new launcher
 2. Configure the PC's OpenXR runtime and connect your headset. For the original Virtual
    Desktop workflow, use its PC Streamer and an OpenXR runtime that exposes Touch actions
@@ -171,9 +173,9 @@ Avoid publishing private paths or licensed files.
 Run the asset-free launcher suite on Windows PowerShell 5.1 or PowerShell 7:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools/tests/launcher-test.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File AI_Debug/tests/launcher-test.ps1
 # Or, with PowerShell 7:
-pwsh -NoProfile -File tools/tests/launcher-test.ps1
+pwsh -NoProfile -File AI_Debug/tests/launcher-test.ps1
 ```
 
 It loads functions through the PowerShell parser without launching the emulator or UI, and
@@ -185,10 +187,10 @@ extraction, dialogs, the actual process launch, or a game.
 Additional source boundary checks:
 
 ```sh
-python3 tools/tests/launcher_source_test.py
+python3 AI_Debug/tests/launcher_source_test.py
 ```
 
-See `tools/tests/run-any4quest-runtime.sh` for isolated runtime tests. A full emulator build,
+See `AI_Debug/tests/run-any4quest-runtime.sh` for isolated runtime tests. A full emulator build,
 Windows UI smoke test, and real Quest 2/3/3S game testing are separate validation gates.
 Before claiming a new game works, verify boot, correct stereo/FOV, two-hand pose and every
 mapped button, single-controller loss/recovery, haptics, recentering, pause/resume,
@@ -201,14 +203,14 @@ pinned JSON source for Runtime tests if needed:
 
 ```sh
 git submodule update --init shadps4-arm64-main/externals/json
-bash tools/tests/run-any4quest-runtime.sh
+bash AI_Debug/tests/run-any4quest-runtime.sh
 python3 shadps4-arm64-main/tests/libraries/test_move_guest_api.py
 python3 shadps4-arm64-main/tests/libraries/test_move_runtime_integration.py
-python3 tools/tests/test_pc_move_host.py --sanitize --check-legacy-against 8431e43a9a2a26e716b35e944611254d65f8d84f
+python3 AI_Debug/tests/test_pc_move_host.py --sanitize --check-legacy-against 8431e43a9a2a26e716b35e944611254d65f8d84f
 bash quest-host/tests/test-move-actions.sh
 bash quest-host/tests/test-game-selection.sh
 bash quest-host/tests/test-move-transport.sh --mock-socket
-python3 tools/tests/launcher_source_test.py
+python3 AI_Debug/tests/launcher_source_test.py
 ```
 
 The guest/runtime tests compile the production source with platform services stubbed.

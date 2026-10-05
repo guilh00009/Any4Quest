@@ -17,7 +17,7 @@ class LauncherSourceTests(unittest.TestCase):
                          "c5cf5a825328ea287542cb544df05f95e093064065c634f6863fc575ac8c43d1")
 
     def test_original_launcher_entry_keeps_default_profile(self):
-        batch = (ROOT / "Play Astro Bot VR.bat").read_text()
+        batch = (ROOT / "Play Any4Quest Gamepad.bat").read_text()
         self.assertIn('pc-vr\\launch.ps1" %*', batch)
         self.assertNotIn("-LauncherProfile any", batch)
 
@@ -33,7 +33,7 @@ class LauncherSourceTests(unittest.TestCase):
         self.assertEqual(settings["fps"], "60")
 
     def test_launcher_tests_are_asset_free_and_parse_checked(self):
-        test = (ROOT / "tools/tests/launcher-test.ps1").read_text()
+        test = (ROOT / "AI_Debug/tests/launcher-test.ps1").read_text()
         self.assertIn("$parseErrors", test)
         self.assertIn("function Make-Sfo", test)
         self.assertIn("synthetic test fixture; not executable", test)

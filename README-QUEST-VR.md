@@ -1,3 +1,7 @@
+> **PCVR first:** The inherited AstroQuest Quest standalone/Android version has not been updated with current Any4Quest PCVR improvements. Standalone updates are deferred until after the PCVR work; PCVR remains incomplete. PCVR test results do not establish standalone compatibility.
+
+> **Historical upstream technical guide.** This document retains AstroQuest development observations and platform-specific workflows. They are not new Any4Quest compatibility results. Start with [Any4Quest setup and current status](README.md); consult [credits](CREDITS.md) for provenance.
+
 # Astro Bot Rescue Mission on Meta Quest 3 — what is in this folder
 
 This folder holds a work-in-progress port of the `shadps4-arm64` PS4 emulator core to immersive VR
@@ -12,7 +16,7 @@ on Meta Quest, built around one game: ASTRO BOT Rescue Mission (CUSA12392).
 | `build/win-x64/` | Windows x64 build of the core, used to develop and test on this PC |
 | `build/arm64/` | The core cross-compiled for the headset (aarch64 Linux/glibc) |
 | `build/quest/astro-vr-host.apk` | The app to install on the headset |
-| `pc-vr/`, `Play Astro Bot VR.bat` | The other way to play: the emulator runs on this PC and the headset shows it through Virtual Desktop. Everything about it is in `README-PC-VR.md` |
+| `pc-vr/`, `Play Any4Quest Gamepad.bat` | The other way to play: the emulator runs on this PC and the headset shows it through Virtual Desktop. Everything about it is in `README-PC-VR.md` |
 
 **App 0.10 (2026-10-03 afternoon): the light.** Everything lit by the game's light probes
 other than the first was lit from the wrong faces: a level keeps its probes in one cube-map
@@ -480,7 +484,7 @@ much). In an input script `mic=0.35` blows for as long as the line lasts, and
 
 `src/core/libraries/json/json.cpp` implements the firmware's JSON library (libSceJson2), which the
 emulator only stubbed. The game hands it the animation sequences of characters and sets of option
-flags; with the stub every such text read as empty. `tools/tests/json_test.cpp` exercises it the
+flags; with the stub every such text read as empty. `AI_Debug/tests/json_test.cpp` exercises it the
 way the game calls it, and `SHADPS4_JSON_TRACE=<count>` logs what is parsed.
 
 ## PC test build

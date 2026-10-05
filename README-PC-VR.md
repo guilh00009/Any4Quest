@@ -1,3 +1,5 @@
+> **Historical upstream technical guide.** This document retains AstroQuest development observations and platform-specific workflows. They are not new Any4Quest compatibility results. Start with [Any4Quest setup and current status](README.md); consult [credits](CREDITS.md) for provenance.
+
 # Astro Bot Rescue Mission on the PC, shown in the headset through Virtual Desktop
 
 The second way to play (the first, the app that runs on the headset itself, is in
@@ -27,7 +29,7 @@ in a small window at every start.
 3. In the headset, start **Virtual Desktop** and connect to the PC. In its Streaming settings
    the frame rate to pick is **120**: the game then draws 60 frames a second and each is
    shown for two refreshes, as on a PlayStation VR. (At 90 it draws 45, at 72 36: see "Speed".)
-4. On the desktop you now see in the headset, start **`Play Astro Bot VR.bat`** (in this
+4. On the desktop you now see in the headset, start **`Play Any4Quest Gamepad.bat`** (in this
    folder). It looks for the game in the `games` folder next to it, up to three folders
    down: an unpacked game (a folder with `eboot.bin` in it) or a `.pkg` package, which it
    offers to unpack there first (PkgTool does it, in about a minute; only a package made
@@ -350,7 +352,7 @@ it; the system's runtime stays Virtual Desktop's.
 | `tools/xrsim-keys.ps1 <key>:<ms> ...` | works the simulator's window: `B` is A and X, `N` is B and Y, `Y G H J` the sticks, `I` the sticks pressed in, `Comma` the menu button (hold keys for a second: short presses are not always seen); `Look:<dx>,<dy>` turns the simulated head, `Click:<x>,<y>` clicks |
 | `tools/pc-rate-compare.sh <name> "<NAME=value ...>"` | the same scripted level walk at 60 frames a second and with the given settings, a picture every two seconds from each |
 | `tools/xr-probe-win` (`build/xr-probe-win/xr_probe_win.exe`) | what a runtime offers: extensions, system, Vulkan requirements |
-| `tools/tests/launcher-test.ps1` | tries the launcher's search for the game (unpacked games and packages, names with brackets, leftovers of an unpacking) on made-up folders |
+| `AI_Debug/tests/launcher-test.ps1` | tries the launcher's search for the game (unpacked games and packages, names with brackets, leftovers of an unpacking) on made-up folders |
 | `tools/ui-drive.ps1 -Steps "text\|picture.png\|button\|seconds", ...` | works the launcher's own windows and message boxes from outside: waits for one that shows a text, saves a picture of it, presses a button. With a release unzipped somewhere and a package put in its `games` folder, that is the whole first start, from the question about unpacking to Play |
 
 Settings for tests: `SHADPS4_XR_HEAD=0` (the head is a script's to move, the host only

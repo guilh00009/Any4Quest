@@ -26,7 +26,7 @@ special buffers retain normal binding and validation. ClampRangeSize is unchange
 The earlier synchronized, exact-pair uniform-selector profile remains separate;
 this increment does not solve arbitrary uniform- or memory-dependent liveness.
 
-Regression: tools/tests/instance_buffer_test.cpp now exercises the real IR adapter,
+Regression: AI_Debug/tests/instance_buffer_test.cpp now exercises the real IR adapter,
 metadata reset, unconditional second accesses, unknown memory predicates, loops,
 unvisited blocks, conditional exports, multiple returns, active/unknown routing,
 nonzero/overflowing firstInstance, and randomized known-bit soundness: 80,132 checks.

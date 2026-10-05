@@ -26,9 +26,9 @@ OpenXR guard blocks; affected production objects and full Release/OpenXR build.
 No real OpenXR runtime/headset failure was injected; hardware remains untested.
 
 Reproducible regression entry points (compiler-configured shell):
-python tools/tests/run_resource_liveness.py --build-dir <existing-Ninja-build>
-python tools/tests/run_shader_module_metadata.py --build-dir <existing-Ninja-build>
-python tools/tests/openxr_waits_test.py --compiler clang++
+python AI_Debug/tests/run_resource_liveness.py --build-dir <existing-Ninja-build>
+python AI_Debug/tests/run_shader_module_metadata.py --build-dir <existing-Ninja-build>
+python AI_Debug/tests/openxr_waits_test.py --compiler clang++
 
 The earlier exact-pair uniform-selector profile remains; this is not a solution
 for arbitrary uniform/memory-dependent resource liveness or every PSVR game.

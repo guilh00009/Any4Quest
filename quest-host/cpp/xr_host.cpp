@@ -180,7 +180,7 @@ private:
         android_info.applicationActivity = activity;
         XrInstanceCreateInfo instance_info{XR_TYPE_INSTANCE_CREATE_INFO};
         instance_info.next = &android_info;
-        std::strcpy(instance_info.applicationInfo.applicationName, "Astro VR Host");
+        std::strcpy(instance_info.applicationInfo.applicationName, "Any4Quest VR Host");
         instance_info.applicationInfo.applicationVersion = 1;
         instance_info.applicationInfo.apiVersion = XR_API_VERSION_1_0;
         instance_info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());

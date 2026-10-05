@@ -195,7 +195,7 @@ namespace Libraries::Kernel { u64 PS4_SYSV_ABI sceKernelGetProcessTime(); }
             os.environ.get("CXX", "g++"), "-std=c++23", "-O1", "-g", "-pthread",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-Wall", "-Wextra", "-Werror",
             "-Wno-unused-variable", "-Wno-unused-parameter", "-Wno-missing-field-initializers",
-            "-I" + str(work), "-I" + str(ROOT.parent / "tools/tests/any4quest_stubs"),
+            "-I" + str(work), "-I" + str(ROOT.parent / "AI_Debug/tests/any4quest_stubs"),
             "-I" + str(ROOT / "src"), "-I" + str(json_include), str(test),
             str(ROOT / "src/core/libraries/move/move.cpp"),
             str(ROOT / "src/core/libraries/vr_tracker/vr_tracker.cpp"),

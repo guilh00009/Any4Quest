@@ -132,7 +132,7 @@ public class SandboxShell extends Instrumentation {
             try {
                 activity[0] = newActivity(MainActivity.class, getTargetContext(), null,
                         (Application) getTargetContext().getApplicationContext(), intent, info,
-                        "Astro VR Host", null, null, null);
+                        "Any4Quest VR Host", null, null, null);
                 callActivityOnCreate(activity[0], null);
             } catch (Throwable e) {
                 failure[0] = e;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Puts the Windows build where "Play Astro Bot VR.bat" runs it from: pc-vr/shadps4.exe, with a
+# Puts the Windows build where "Play Any4Quest Gamepad.bat" runs it from: pc-vr/shadps4.exe, with a
 # user folder of its own (settings fit for playing, not for testing; saves; logs).
 #   tools/make-pc-vr.sh            copy the emulator from build/win-x64, make what is missing
 #   tools/make-pc-vr.sh --save     also copy the test build's save, if pc-vr has none yet

@@ -1,3 +1,5 @@
+> Any4Quest retains the following inherited AstroQuest notices. See [CREDITS.md](CREDITS.md) for fork provenance. The release inventory below describes upstream packaging; verify the contents, versions and corresponding source of any new Any4Quest binary before distribution.
+
 # Third-party notices
 
 AstroQuest itself is licensed under GPL-2.0-or-later (see [LICENSE](LICENSE)). The release files
@@ -34,7 +36,7 @@ whose notice (`shadps4-arm64-main/NOTICE.android-runtime.md`) and lock files
 
 | Part | License | Source |
 | --- | --- | --- |
-| The emulator (`shadps4.exe`) and the launcher (`launch.ps1`, `Play Astro Bot VR.bat`) | GPL-2.0-or-later | this repository |
+| The emulator (`shadps4.exe`) and the launcher (`launch.ps1`, `Play Any4Quest Gamepad.bat`) | GPL-2.0-or-later | this repository |
 | The libraries built into the emulator (`shadps4-arm64-main/externals`) | their own licenses, in each folder | the submodules listed in [.gitmodules](.gitmodules) |
 | Khronos OpenXR loader 1.1.63, built into the emulator | Apache-2.0 | `shadps4-arm64-main/externals/openxr-sdk` ([KhronosGroup/OpenXR-SDK](https://github.com/KhronosGroup/OpenXR-SDK), release 1.1.63) |
 | PkgTool and LibOrbisPkg 0.2.231 (`pc-vr/pkgtool`), unchanged: the launcher runs it to unpack a game package | LGPL-3.0 | [maxton/LibOrbisPkg](https://github.com/maxton/LibOrbisPkg), release [v0.2](https://github.com/maxton/LibOrbisPkg/releases/tag/v0.2) |

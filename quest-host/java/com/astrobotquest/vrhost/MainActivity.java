@@ -223,7 +223,7 @@ public class MainActivity extends Activity
         File external = getExternalFilesDir(null);
         keepPrevious(new File(external, "host.log"), new File(external, "host.prev.log"));
         nativeSetLogFile(new File(external, "host.log").getAbsolutePath());
-        logInfo("Astro VR Host " + versionName() + " on " + Build.MODEL + ", system "
+        logInfo("Any4Quest VR Host " + versionName() + " on " + Build.MODEL + ", system "
                 + Build.DISPLAY);
 
         readSettings();
@@ -715,7 +715,7 @@ public class MainActivity extends Activity
         paint.setColor(Color.rgb(90, 170, 255));
         paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
         paint.setTextSize(52);
-        canvas.drawText("Astro VR Host", 48, 86, paint);
+        canvas.drawText("Any4Quest VR Host", 48, 86, paint);
 
         paint.setColor(Color.WHITE);
         paint.setTypeface(Typeface.DEFAULT);

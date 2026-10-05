@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='move-runtime-windows-') as tmp:
  capture_source=capture_source.replace(anchor, '    Core::Vr::Diagnostics::Capture::Instance().Stop();\n    Core::Vr::Diagnostics::Capture::Instance().Wait();\n'+anchor,1)
  (w/'test.cpp').write_text(capture_source)
  exe=w/'integration-test.exe'
- subprocess.run(['clang++','-std=c++23','-D_CRT_SECURE_NO_WARNINGS','-O1','-Wall','-Wextra','-Werror','-Wno-unused-variable','-Wno-unused-parameter','-Wno-missing-field-initializers','-I'+str(w),'-I'+str(repo/'tools/tests/any4quest_stubs'),'-I'+str(root/'src'),'-I'+str(root/'externals/json/single_include'),str(w/'test.cpp'),str(root/'src/core/libraries/move/move.cpp'),str(root/'src/core/libraries/vr_tracker/vr_tracker.cpp'),str(root/'src/core/vr/vr_runtime.cpp'),'-o',str(exe)],check=True)
+ subprocess.run(['clang++','-std=c++23','-D_CRT_SECURE_NO_WARNINGS','-O1','-Wall','-Wextra','-Werror','-Wno-unused-variable','-Wno-unused-parameter','-Wno-missing-field-initializers','-I'+str(w),'-I'+str(repo/'AI_Debug/tests/any4quest_stubs'),'-I'+str(root/'src'),'-I'+str(root/'externals/json/single_include'),str(w/'test.cpp'),str(root/'src/core/libraries/move/move.cpp'),str(root/'src/core/libraries/vr_tracker/vr_tracker.cpp'),str(root/'src/core/vr/vr_runtime.cpp'),'-o',str(exe)],check=True)
  subprocess.run([str(exe)],check=True)
 
 

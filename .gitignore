@@ -12,7 +12,7 @@
 !/README-ANY4QUEST.md
 !/LICENSE
 !/THIRD-PARTY-NOTICES.md
-!/Play Astro Bot VR.bat
+!/Play Any4Quest Gamepad.bat
 !/Play Any4Quest VR.bat
 !/quest-host/
 !/shadps4-arm64-main/
@@ -31,7 +31,7 @@
 !/tools/probes/
 !/tools/re/
 !/tools/shims/
-!/tools/tests/
+
 /tools/*.local
 
 # Never anywhere: game files and packages.
@@ -48,3 +48,16 @@ savedata/
 # Python test caches are generated, never source.
 __pycache__/
 *.pyc
+
+# Contributor documentation and reusable asset-free diagnostics.
+!/AGENTS.md
+!/CREDITS.md
+!/AI_Debug/
+/AI_Debug/*
+!/AI_Debug/README.md
+!/AI_Debug/tests/
+!/AI_Debug/controls/
+/AI_Debug/local/
+*.exe
+*.obj
+*.pdb

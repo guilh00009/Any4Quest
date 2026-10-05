@@ -4,9 +4,9 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 mkdir -p "$out/include/common/logging" "$out/include/core/libraries/system"
-cp "$root/tools/tests/any4quest_stubs/common/logging/log.h" "$out/include/common/logging/"
-cp "$root/tools/tests/any4quest_stubs/common/path_util.h" "$out/include/common/"
-cp "$root/tools/tests/any4quest_stubs/core/libraries/system/systemservice.h" \
+cp "$root/AI_Debug/tests/any4quest_stubs/common/logging/log.h" "$out/include/common/logging/"
+cp "$root/AI_Debug/tests/any4quest_stubs/common/path_util.h" "$out/include/common/"
+cp "$root/AI_Debug/tests/any4quest_stubs/core/libraries/system/systemservice.h" \
    "$out/include/core/libraries/system/"
 printf '#pragma once\nnamespace Common { inline void SetCurrentThreadName(const char*) {} }\n' \
     > "$out/include/common/thread.h"

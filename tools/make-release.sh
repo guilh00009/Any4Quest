@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Packs the files of a GitHub release into build/release/:
-#   AstroQuest-<version>-Quest3.apk           the headset app, build/quest/astro-vr-host.apk
-#   AstroQuest-<version>-PC-VR-Windows.zip    the PC play folder: the emulator from
+#   Any4Quest-<version>-Quest3.apk           the headset app, build/quest/astro-vr-host.apk
+#   Any4Quest-<version>-PC-VR-Windows.zip    the PC play folder: the emulator from
 #                                             build/win-x64, the launcher, clean settings, and
 #                                             PkgTool (tools/pkgtool) for unpacking a game
 #                                             package; no game, saves, logs or caches
@@ -13,7 +13,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 version=${1:?usage: tools/make-release.sh <version>}
 python=${PYTHON:-$(cat "$root/tools/python.local" 2>/dev/null || command -v python3 || command -v python)}
 aapt2="${ANDROID_SDK:-$LOCALAPPDATA/Android/Sdk}/build-tools/36.1.0/aapt2.exe"
-name="AstroQuest-$version"
+name="Any4Quest-$version"
 out="$root/build/release"
 pc="$out/$name-PC-VR-Windows"
 
@@ -31,8 +31,18 @@ cp "$apk" "$out/$name-Quest3.apk"
 
 cp "$root/build/win-x64/shadps4.exe" "$pc/pc-vr/"
 cp "$root/pc-vr/launch.ps1" "$pc/pc-vr/"
-cp "$root/Play Astro Bot VR.bat" "$root/Play Any4Quest VR.bat" "$pc/"
-cp "$root/README-ANY4QUEST.md" "$pc/"
+cp "$root/Play Any4Quest Gamepad.bat" "$root/Play Any4Quest VR.bat" "$pc/"
+cp "$root/README-ANY4QUEST.md" "$root/README.md" "$root/CREDITS.md" "$root/README-PC-VR.md" "$root/README-QUEST-VR.md" "$pc/"
+# Developer-only documentation is read from source, not copied with private sessions.
+"$python" - "$(cygpath -m "$pc/README.md")" <<'EOF'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+text = p.read_text(encoding="utf-8")
+for target in ("AI_Debug/README.md", "AGENTS.md"):
+    text = text.replace("(" + target + ")", "(https://github.com/guilh00009/Any4Quest/blob/main/" + target + ")")
+p.write_text(text, encoding="utf-8")
+EOF
 cp "$root/pc-vr/user/input_config/default.ini" "$root/pc-vr/user/input_config/global.ini" \
    "$pc/pc-vr/user/input_config/"
 # What the launcher unpacks a game package with.
@@ -64,39 +74,26 @@ json.dump(config, open(sys.argv[2], "w", encoding="utf-8"), indent=2)
 EOF
 
 cat > "$pc/games/PUT YOUR GAME HERE.txt" <<'EOF'
-Put your own copy of ASTRO BOT Rescue Mission (European release CUSA12392, version 1.00) in
-this folder, then start "Play Astro Bot VR.bat". Either form will do, anywhere in here:
-
-- the game's folder, the one with eboot.bin in it, or
-- the game's .pkg file: it is unpacked the first time, which takes a minute and about 13 GB.
-  (Only a package made from a dump of the game can be unpacked. One downloaded from the
-  PlayStation Store is encrypted and cannot be used.)
-
-If the game is somewhere else, just start: a window asks where it is.
+Put your own legally obtained, decrypted game dump here (a folder with eboot.bin and
+sce_sys/param.sfo). Start "Play Any4Quest VR.bat" and select the game. Decrypted .pkg
+dumps require the bundled PkgTool and enough free space for extraction. Encrypted
+store downloads are unsupported. See README.md for tested titles and limitations.
+Selecting a game does not establish compatibility. No game files are included.
 EOF
 cat > "$pc/README.txt" <<EOF
-AstroQuest $version - ASTRO BOT Rescue Mission in VR, played on this PC and shown in a Meta
-Quest through Virtual Desktop. https://github.com/bigmak94/AstroQuest
+Any4Quest $version - experimental PSVR game emulation through OpenXR.
+Source: https://github.com/guilh00009/Any4Quest
 
-1. Put your own copy of the game in the games folder: its folder (the one with eboot.bin in
-   it) or its .pkg file, which is unpacked the first time. Or skip this: a window asks where
-   the game is. Keep this folder's path short, e.g. C:\Games\AstroQuest: the emulator cannot
-   open the game's files whose full path would be longer than 260 characters.
-2. Virtual Desktop: install the Streamer on this PC and choose VDXR as the OpenXR runtime in
-   its Options. In the headset, set Virtual Desktop's frame rate to 120 (Streaming settings).
-3. Connect the DualSense to this PC (USB cable, or Bluetooth paired with the PC, not with the
-   headset). Without a gamepad the headset's Touch controllers play.
-4. Connect Virtual Desktop to this PC, then start "Play Astro Bot VR.bat". (If the Microsoft
-   Visual C++ runtime is missing, it says so and offers Microsoft's download.)
+Start "Play Any4Quest VR.bat". Read README.md for setup, the tested-games matrix,
+input profiles, desktop mode and current limits. Keep paths short. Settings are
+in pc-vr/settings.txt; local saves and logs are under pc-vr/user.
 
-In the game: hold the controller where the outline is on the first screen; look at a planet
-and press X to choose it; hold OPTIONS for a second to reset the view. Settings are in
-pc-vr\settings.txt, the log in pc-vr\user\log\shad_log.txt, saves in pc-vr\user\home.
-
-AstroQuest is free software under the GNU GPL, version 2 or later (LICENSE.txt); the source is
-at the address above. It contains no part of the game: use it only with a game you own.
+Any4Quest is GPL-2.0-or-later (LICENSE.txt). Upstream work is credited in CREDITS.md
+and THIRD-PARTY-NOTICES.md. No game files are included. Universal compatibility is
+a development goal, not a claim that every PSVR game works.
 EOF
 tr -d '\r' < "$root/LICENSE" > "$pc/LICENSE.txt"
+cp "$root/LICENSE" "$pc/LICENSE"
 cp "$root/THIRD-PARTY-NOTICES.md" "$pc/THIRD-PARTY-NOTICES.md"
 
 "$python" - "$(cygpath -m "$out")" "$name-PC-VR-Windows" <<'EOF'

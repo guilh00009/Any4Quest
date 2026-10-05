@@ -37,7 +37,7 @@ validation. No draw, assertion or shader instruction is skipped.
 This differs from the earlier menu profile, which snapshots a uniform selector from
 VS constant memory. The prior uniform profile is retained without broadening it.
 
-Tests: tools/tests/instance_buffer_test.cpp covers 1298 assertions over direct ranges,
+Tests: AI_Debug/tests/instance_buffer_test.cpp covers 1298 assertions over direct ranges,
 wraparound, all selector masks, active resources, metadata mismatches, cross-pairs
 and unknown cases. Existing conditional_buffer_test.cpp retains its 34 passing checks.
 Temporary memory/descriptor diagnostics were removed from the final source.

@@ -1,8 +1,8 @@
 // Checks the emulator's sce::Json implementation by calling it the way a title does: through the
 // exported member functions, with objects that are nothing but storage of the right size.
 //
-//   clang-cl /std:c++latest /EHsc -fuse-ld=lld /I tools/tests/stubs /I shadps4-arm64-main/src
-//       tools/tests/json_test.cpp shadps4-arm64-main/src/core/libraries/json/json.cpp
+//   clang-cl /std:c++latest /EHsc -fuse-ld=lld /I AI_Debug/tests/stubs /I shadps4-arm64-main/src
+//       AI_Debug/tests/json_test.cpp shadps4-arm64-main/src/core/libraries/json/json.cpp
 #include <cstdio>
 #include <cstring>
 #include <string>
