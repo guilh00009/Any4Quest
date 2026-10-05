@@ -1,0 +1,55 @@
+Shared uniform selector proof / ACT1_COMA crash, 2026-10-05
+
+Verified checkpoint: ACT_SCENE=ACT1_COMA, Player_Location=Dream_Terror,
+MUSIC_Dialogue=ACT1_04_WendigoEscape, DREAM=Off. Isolated autosave 16:01:40.
+The scripted grab was intended gameplay; the subsequent GPU assertion was not.
+
+Before fix: Resume reproduced ClampRangeSize invalid address 0x600.
+FS d411b2561ed68fde binding6 sharp108 size e9100000; compiler metadata input3,
+mask8. Input3 routes flat VS Param5. VS c51c88dee6a11aac has eight buffers,
+no InstanceId export proof. Active mask stayed15 because the previous runtime
+recognized only two explicit vertex hashes. This is the same demonstrated
+resource-binding mechanism as the earlier 588c15fbe6a11aac/a367d0e1bbe3840d
+failure, not the Windows 0xE06D7363 C++ exception / xrGetSystem issue.
+This reproduction ran with OpenXR disabled. No native dump/stack was available;
+the existing assertion location plus targeted binder diagnostics identify the
+call path. The diagnostic did not bypass validation.
+
+Correction: shader compilation derives a bounded, pointer-free expression from
+ReadConstBuffer, bit casts, bitwise operations, logical shifts, and Phi merges.
+No title ID, shader hash, fixed descriptor slot, or fixed export number is used.
+A single unconditional Param.x write is required, all blocks are checked, and
+cyclic/unsupported/dynamic-address/multi-buffer expressions are rejected.
+Phi merges intersect known bits across every predecessor rather than guessing
+control flow. This may conservatively retain extra resources.
+
+The binder validates the read-only source, synchronizes it, snapshots its full
+contents, evaluates possible low-two-bit values, and binds the same snapshot to
+the vertex shader. Existing flat-routing and fragment-access proofs determine
+whether a resource is inactive. Unknown proofs retain normal binding and memory
+validation. Geometry/tessellation routing remains excluded. External SPIR-V
+replacement invalidates the proof. Shader metadata version changes from5 to6.
+ClampRangeSize and exception handling are unchanged.
+
+The newly captured VS IR confirms the relevant expression uses word0 shifted
+31 bits, ORed with Phi(word2,0), bitcast and written once to Param5.x.
+Private game shader dumps remain only in the isolated workspace, not in Git.
+
+Regression tests: 89,169 real-IR / known-bit checks pass. Added checks cover
+all incoming Phi values, multiple export indices, nonzero buffer/word indices,
+writable buffers, multiple/conditional writes, cyclic/unsupported values,
+dynamic offsets, multiple source buffers, truncated snapshots, malformed node
+references, and proof invalidation for replaced modules.
+
+First fixed replay A8CC25CEA2E32A9D729E141FA929C267828461E5B8F2327002219F514935B4BC
+loaded the previously crashing checkpoint and rendered the next room. Head
+movement and a bedside flashlight prompt were verified. Movement buttons did
+not move the player in this seated state; no claim of locomotion there.
+Final cleanup build removes temporary dump instrumentation and adds an explicit
+cached export-index bound before shifting. Final SHA256:
+9EDD1D72FA2936916A98F7E9B7E12E82172C00D21E6444B59F84BC01997B3E0F.
+Exact final-build replay result is recorded in workspace crash-160140 evidence.
+
+This fixes the reproduced shared mechanism, not universal game compatibility.
+Physical Quest tracking and the deferred dual-thumbstick feature are separate.
+No commits or pushes made as part of this change.

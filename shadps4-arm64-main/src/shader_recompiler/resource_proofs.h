@@ -5,6 +5,7 @@ namespace Shader {
 inline void InvalidateResourceProofs(Info& info) {
     info.resource_proofs_valid = false;
     info.instance_export_mask = 0;
+    info.uniform_selector = {};
     for (auto& buffer : info.buffers) {
         buffer.is_used = true;
         buffer.instance_input = 255;

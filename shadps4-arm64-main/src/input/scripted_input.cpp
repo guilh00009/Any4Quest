@@ -253,6 +253,9 @@ void Replay(std::vector<Step> steps, std::filesystem::path script) {
             for (unsigned hand=0;hand<2;++hand) {
                 move_touch[hand].squeeze=std::max(move_touch[hand].squeeze,step.moves.touch[hand].squeeze);
                 move_touch[hand].primary |= step.moves.touch[hand].primary;
+                move_touch[hand].secondary |= step.moves.touch[hand].secondary;
+                move_touch[hand].menu |= step.moves.touch[hand].menu;
+                move_touch[hand].stick_click |= step.moves.touch[hand].stick_click;
                 move_trigger[hand]=std::max(move_trigger[hand],step.moves.trigger[hand]);
             }
             microphone = std::max(microphone, step.microphone);

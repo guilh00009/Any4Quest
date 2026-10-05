@@ -19,6 +19,18 @@ int main() {
     assert(Core::Vr::MoveInput::MapTouchButtons(s.touch[1])==0);
     assert(Parse("move1_primary",s,pose));
     assert(Core::Vr::MoveInput::MapTouchButtons(s.touch[1])==Core::Vr::MoveInput::Cross);
+    for (unsigned hand=0; hand<2; ++hand) {
+        Step menu;
+        const auto prefix="move"+std::to_string(hand);
+        assert(Parse(prefix+"_secondary",menu,pose));
+        assert(Core::Vr::MoveInput::MapTouchButtons(menu.touch[hand])==Core::Vr::MoveInput::Circle);
+        assert(Parse(prefix+"_menu",menu,pose));
+        assert(Parse(prefix+"_stick_click",menu,pose));
+        assert(Core::Vr::MoveInput::MapTouchButtons(menu.touch[hand])==
+            (Core::Vr::MoveInput::Circle|Core::Vr::MoveInput::Start|Core::Vr::MoveInput::Select));
+        assert(Core::Vr::MoveInput::MapTouchButtons(menu.touch[1-hand])==0);
+        assert(!Parse(prefix+"_secondary=1",menu,pose));
+    }
     assert(Parse("move1_trigger=0.5",s,pose));
     assert(Core::Vr::MoveInput::TriggerToByte(s.trigger[1])==128 && s.trigger[0]==0);
     assert(!Parse("move2_grip=1",s,pose) && !Parse("ly=0",s,pose));

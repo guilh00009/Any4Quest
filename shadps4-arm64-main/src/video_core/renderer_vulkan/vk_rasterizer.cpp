@@ -598,30 +598,24 @@ bool Rasterizer::BindResources(const Pipeline* pipeline,
             conditional_instance_exports = vs->instance_export_mask;
         }
         if (vs && fs && vs->resource_proofs_valid && fs->resource_proofs_valid && direct_routing &&
-            ConditionalBuffers::HasUniformSelector(vs->pgm_hash, vs->buffers.size())) {
-            const auto& selector = vs->buffers[0];
+            vs->uniform_selector.count && vs->uniform_selector.attribute < 32 &&
+            vs->uniform_selector.buffer < vs->buffers.size()) {
+            const auto& proof = vs->uniform_selector;
+            const auto& selector = vs->buffers[proof.buffer];
             const auto sharp = selector.GetSharp(*vs);
             const auto size = sharp.GetSize();
-            if (selector.sharp_idx == ConditionalBuffers::SelectorSharp(vs->pgm_hash) && selector.used_as_readconst && !selector.is_written &&
-                size >= 12 && size <= 65536 && memory->IsValidMapping(sharp.base_address, size)) {
-                // Synchronize GPU writes, then bind the exact bytes used for the CPU predicate.
+            if (!selector.IsSpecial() && selector.used_as_readconst && !selector.is_written &&
+                size >= u64{proof.required_words} * 4 && size <= 65536 &&
+                memory->IsValidMapping(sharp.base_address, size)) {
+                // Evaluate immutable bytes and bind those same bytes for the vertex stage.
+                // Phi merges retain every possible incoming value, including untaken paths.
                 buffer_cache.ReadMemory(sharp.base_address, size);
                 auto snapshot = IsolateReadConstGuestBuffer(sharp.base_address, size);
-                std::array<u32, 3> words;
-                std::memcpy(words.data(), snapshot->mapped_data.data(), sizeof(words));
-                conditional_material = ConditionalBuffers::Material(words[0], words[2]);
+                const auto bytes = std::span{reinterpret_cast<const std::byte*>(
+                    snapshot->mapped_data.data()), static_cast<size_t>(size)};
+                conditional_instance_mask = proof.Mask(bytes);
+                conditional_instance_exports = 1u << proof.attribute;
                 conditional_selector_snapshot = snapshot.get();
-                // The verified vertex export is uniform across all instances. The
-                // fragment compiler unions every access, including later loops;
-                // only its proved flat-input branch mask can suppress a buffer.
-                conditional_instance_mask = 1u << conditional_material;
-                conditional_instance_exports = 1u << 5;
-                static bool selector_logged{};
-                if (!selector_logged && vs->pgm_hash == ConditionalBuffers::LaterVertexHash) {
-                    selector_logged = true;
-                    LOG_INFO(Render_Vulkan, "Uniform selector snapshot: VS={:#x}, material={}, buffer bytes={}",
-                             vs->pgm_hash, conditional_material, size);
-                }
                 isolated_readconst_buffers.push_back(std::move(snapshot));
             }
         }
@@ -858,7 +852,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             is_storage ? instance.StorageMinAlignment() : instance.UniformMinAlignment();
         // Buffer is not from the cache, either a special buffer or unbound.
         if (conditional_selector_snapshot && stage.l_stage == Shader::LogicalStage::Vertex &&
-            i == 0 && desc.sharp_idx == ConditionalBuffers::SelectorSharp(stage.pgm_hash)) {
+            i == stage.uniform_selector.buffer) {
             buffer_infos.emplace_back(conditional_selector_snapshot->Handle(), 0, size);
             buffer_barriers.emplace_back(vk::BufferMemoryBarrier2{
                 .srcStageMask = vk::PipelineStageFlagBits2::eHost,

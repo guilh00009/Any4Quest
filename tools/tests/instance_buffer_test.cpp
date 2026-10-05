@@ -4,6 +4,7 @@
 #include <random>
 #define LOG_DEBUG(...) ((void)0)
 #include "shader_recompiler/ir/passes/resource_liveness.h"
+#include "shader_recompiler/resource_proofs.h"
 using namespace Shader;
 using namespace Shader::IR;
 using namespace Shader::Liveness;
@@ -183,6 +184,92 @@ int main() {
                                  {.type = T::Return});
     Optimization::CollectResourceLiveness(f.program);
     Check(!f.info.instance_export_mask);
+  }
+
+  // Uniform metadata is proved from IR, independently of shader hashes,
+  // descriptor slots, and export numbers. Phi unions include untaken inputs.
+  for (unsigned attribute : {0u, 5u, 17u, 31u}) {
+    Fixture f{LogicalStage::Vertex};
+    f.info.buffers[0].used_as_readconst = true;
+    auto enable = f.Add(f.first, O::ReadConstBuffer, {Value{0u}, Value{0u}});
+    auto select = f.Add(f.first, O::ReadConstBuffer, {Value{0u}, Value{2u}});
+    auto phi = f.Add(f.first, O::Phi, {});
+    phi.Inst()->AddPhiOperand(&f.first, select);
+    phi.Inst()->AddPhiOperand(&f.body, Value{0u});
+    auto high = f.Add(f.first, O::ShiftLeftLogical32, {enable, Value{31u}});
+    auto combined = f.Add(f.first, O::BitwiseOr32, {phi, high});
+    auto bits = f.Add(f.first, O::BitCastF32U32, {combined});
+    auto output = f.Add(f.tail, O::SetAttribute,
+        {Value{Attribute::Param0 + attribute}, bits, Value{0u}});
+    f.BlockNode(f.first); f.BlockNode(f.body); f.BlockNode(f.tail); f.Node(T::Return);
+    Optimization::CollectResourceLiveness(f.program);
+    const auto proof = f.info.uniform_selector;
+    Check(proof.count && proof.buffer == 0 && proof.attribute == attribute);
+    Check(proof.required_words == 3);
+    for (unsigned i = 0; i < 1000; ++i) {
+      std::array<u32, 3> words{rng(), 0, rng()};
+      const unsigned mask = proof.Mask(std::as_bytes(std::span{words}));
+      // Both actual predecessor choices must be included; no branch guessing.
+      Check(mask & 1u);
+      Check(mask & (1u << (words[2] & 3)));
+      if ((words[2] & 3) == 0) Check(mask == 1);
+    }
+    std::array<u32, 3> words{0, 0, 2};
+    Check(proof.Mask(std::as_bytes(std::span{words})) == 5);
+    Check(proof.Mask(std::as_bytes(std::span{words}).first(8)) == 15);
+    auto corrupt = proof; corrupt.count = 65;
+    Check(corrupt.Mask(std::as_bytes(std::span{words})) == 15);
+    corrupt = proof; corrupt.nodes[proof.root].a = 63;
+    Check(corrupt.Mask(std::as_bytes(std::span{words})) == 15);
+    f.info.buffers[0].is_written = true;
+    Optimization::CollectResourceLiveness(f.program);
+    Check(!f.info.uniform_selector.count);
+    f.info.buffers[0].is_written = false;
+    // Multiple writes and cyclic/unsupported expressions cannot prove exclusion.
+    f.Add(f.tail, O::SetAttribute,
+        {Value{Attribute::Param0 + attribute}, bits, Value{0u}});
+    Optimization::CollectResourceLiveness(f.program);
+    Check(!f.info.uniform_selector.count);
+    phi.Inst()->AddPhiOperand(&f.tail, phi);
+    Optimization::UniformSelectorBuilder cyclic;
+    Check(cyclic.Build(phi) < 0);
+    Optimization::UniformSelectorBuilder unknown;
+    auto id = f.Add(f.first, O::GetAttributeU32, {Value{Attribute::InstanceId}, Value{0u}});
+    Check(unknown.Build(id) < 0);
+  }
+  {
+    Fixture f{LogicalStage::Vertex};
+    f.info.buffers.emplace_back();
+    f.info.buffers[0].used_as_readconst = f.info.buffers[1].used_as_readconst = true;
+    auto a = f.Add(f.first, O::ReadConstBuffer, {Value{0u}, Value{0u}});
+    auto b = f.Add(f.first, O::ReadConstBuffer, {Value{1u}, Value{0u}});
+    auto both = f.Add(f.first, O::BitwiseOr32, {a,b});
+    Optimization::UniformSelectorBuilder builder;
+    Check(builder.Build(both) < 0); // No cross-buffer snapshot assumption.
+    auto dynamic = f.Add(f.first, O::ReadConstBuffer, {Value{0u}, a});
+    Optimization::UniformSelectorBuilder offsets;
+    Check(offsets.Build(dynamic) < 0);
+    f.Add(f.body, O::SetAttribute, {Value{Attribute::Param5}, a, Value{0u}});
+    f.BlockNode(f.first); f.If(Value{true}); f.BlockNode(f.body); f.Node(T::EndIf);
+    f.BlockNode(f.tail); f.Node(T::Return);
+    Optimization::CollectResourceLiveness(f.program);
+    Check(!f.info.uniform_selector.count); // Conditional export is not guaranteed.
+  }
+
+  {
+    Fixture f{LogicalStage::Vertex};
+    for (unsigned i = 0; i < 3; ++i) f.info.buffers.emplace_back();
+    f.info.buffers[3].used_as_readconst = true;
+    auto value = f.Add(f.first, O::ReadConstBuffer, {Value{3u}, Value{7u}});
+    f.Add(f.tail, O::SetAttribute, {Value{Attribute::Param17}, value, Value{0u}});
+    f.BlockNode(f.first); f.BlockNode(f.body); f.BlockNode(f.tail); f.Node(T::Return);
+    Optimization::CollectResourceLiveness(f.program);
+    Check(f.info.uniform_selector.count && f.info.uniform_selector.buffer == 3);
+    Check(f.info.uniform_selector.attribute == 17 && f.info.uniform_selector.required_words == 8);
+    std::array<u32,8> words{}; words[7] = 3;
+    Check(f.info.uniform_selector.Mask(std::as_bytes(std::span{words})) == 8);
+    InvalidateResourceProofs(f.info);
+    Check(!f.info.resource_proofs_valid && !f.info.uniform_selector.count);
   }
   std::cout << "PASS " << checks
             << " checks; real IR adapter and known-bit soundness\n";

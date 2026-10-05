@@ -4,6 +4,7 @@
 #pragma once
 
 #include <bit>
+#include "shader_recompiler/uniform_selector.h"
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -42,6 +43,7 @@ enum class Qualifier : u8 {
 struct InfoPersistent {
     bool resource_proofs_valid{true}; // False for externally replaced SPIR-V
     u32 instance_export_mask{}; // Param.x low bits proven equal InstanceIndex & 3
+    Liveness::UniformSelector uniform_selector;
     BufferResourceList buffers;
     ImageResourceList images;
     SamplerResourceList samplers;

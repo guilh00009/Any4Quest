@@ -33,6 +33,18 @@ bool Parse(const std::string& token, Step& step, ParsePose parse_pose) {
             step.trigger[hand]=std::stof(token.substr(prefix.size()+9));
             return true;
         }
+        if (token == prefix+"_secondary") {
+            step.touch[hand].secondary=true;
+            return true;
+        }
+        if (token == prefix+"_menu") {
+            step.touch[hand].menu=true;
+            return true;
+        }
+        if (token == prefix+"_stick_click") {
+            step.touch[hand].stick_click=true;
+            return true;
+        }
         if (token == prefix+"_primary") {
             step.touch[hand].primary=true;
             return true;

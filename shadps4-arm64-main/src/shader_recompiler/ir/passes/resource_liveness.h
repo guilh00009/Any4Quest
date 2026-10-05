@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <bit>
+#include "shader_recompiler/ir/passes/uniform_selector_analysis.h"
 #include <unordered_map>
 #include <unordered_set>
 #include "shader_recompiler/ir/passes/buffer_usage.h"
@@ -97,6 +98,7 @@ private:
 };
 
 inline void CollectResourceLiveness(IR::Program& program) {
+    CollectUniformSelector(program);
     auto& info = program.info;
     info.instance_export_mask = 0;
     for (auto& buffer : info.buffers) {
