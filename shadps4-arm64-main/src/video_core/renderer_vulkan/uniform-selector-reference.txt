@@ -35,7 +35,7 @@ The newly captured VS IR confirms the relevant expression uses word0 shifted
 31 bits, ORed with Phi(word2,0), bitcast and written once to Param5.x.
 Private game shader dumps remain only in the isolated workspace, not in Git.
 
-Regression tests: 89,169 real-IR / known-bit checks pass. Added checks cover
+Regression tests: 89,176 real-IR / known-bit checks pass. Added checks cover
 all incoming Phi values, multiple export indices, nonzero buffer/word indices,
 writable buffers, multiple/conditional writes, cyclic/unsupported values,
 dynamic offsets, multiple source buffers, truncated snapshots, malformed node
@@ -51,5 +51,10 @@ cached export-index bound before shifting. Final SHA256:
 Exact final-build replay result is recorded in workspace crash-160140 evidence.
 
 This fixes the reproduced shared mechanism, not universal game compatibility.
-Physical Quest tracking and the deferred dual-thumbstick feature are separate.
+Physical Quest tracking is separate. The PC dual-stick preview is documented in
+README-ANY4QUEST.md; combined build1194C340F94CCC1B61B95AE642C4FFE3EA737E06218D38DCF625D962D6A72327
+also replayed ACT1_COMA and continued with flashlight pickup, forward movement and turns.
 No commits or pushes made as part of this change.
+
+Per-export selector facts preserve simultaneous InstanceId and uniform proofs.
+Final shader-only SHA256946C81F9D546D4EEEDFE96E734553A705FDC2387D0FB075BB8AEF6A38AC2544B replay passed.

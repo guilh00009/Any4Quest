@@ -179,6 +179,12 @@ try {
         Check "generic still has shared FOV" $values["SHADPS4_VR_FOV"] "90"
         Check "generic still has shared MSAA" $values["SHADPS4_MAX_MSAA"] "2"
     }
+    $settings["move_locomotion"] = "directional"
+    Check "directional stick profile" (Get-LaunchEnvironment $genericInfo)["SHADPS4_MOVE_LOCOMOTION"] "directional"
+    $settings["move_locomotion"] = "bad"
+    Check-Throws "invalid stick profile rejected" { Get-LaunchEnvironment $genericInfo }
+    $settings.Remove("move_locomotion")
+    Check "stick default is legacy" (Get-LaunchEnvironment $genericInfo)["SHADPS4_MOVE_LOCOMOTION"] "legacy"
     $extraEnv = @()
     Set-LaunchEnvironment $astroInfo
     Check "Astro launch sets requested width" $env:SHADPS4_TITLE_EYE_WIDTH "3600"

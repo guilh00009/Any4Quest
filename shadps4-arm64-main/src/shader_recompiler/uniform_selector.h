@@ -6,6 +6,22 @@
 #include "shader_recompiler/ir/passes/known_bits.h"
 
 namespace Shader::Liveness {
+// Draw-time facts are per export: adding a uniform proof must not erase an
+// independent InstanceId proof used by another fragment input.
+struct ExportResidues {
+    std::array<unsigned, 32> masks{};
+    unsigned proven{};
+    void Set(unsigned exports, unsigned mask) {
+        if (mask > 15) return;
+        for (unsigned i = 0; i < 32; ++i)
+            if (exports & (1u << i)) masks[i] = mask;
+        proven |= exports;
+    }
+    unsigned Mask(unsigned index) const {
+        return index < 32 && (proven & (1u << index)) ? masks[index] : 15;
+    }
+};
+
 // A bounded, pointer-free proof, suitable for the shader metadata cache.
 // Merge intersects known bits from every incoming SSA value: it never assumes
 // which control-flow edge executes. Only one read-only buffer is supported.

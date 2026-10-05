@@ -380,12 +380,6 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfo& video_info) {
 }
 
 bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
-    if (m_current_video_frame.has_value()) {
-        m_video_buffers.Push(std::move(m_current_video_frame->buffer));
-        m_current_video_frame.reset();
-        m_video_buffers_cv.Notify();
-    }
-
     if (!IsActive() || m_is_paused) {
         const u64 count = ++m_trace_video_data_inactive_count;
         if (ShouldTraceCount(count)) {
@@ -431,8 +425,21 @@ bool AvPlayerSource::GetVideoData(AvPlayerFrameInfoEx& video_info) {
     }
 
     auto frame = m_video_frames.Pop();
-    video_info = frame->info;
+    if (!frame) {
+        // A queue can be cleared between the availability check and consumption.
+        return false;
+    }
+    // A false poll leaves the guest displaying the previously delivered frame.
+    // Do not return that storage to the decoder until a replacement is ready:
+    // polling faster than the movie cadence must not let a background decode
+    // overwrite the last image. The pool has at least two buffers (see Init).
+    auto previous_frame = std::move(m_current_video_frame);
     m_current_video_frame = std::move(frame);
+    video_info = m_current_video_frame->info;
+    if (previous_frame) {
+        m_video_buffers.Push(std::move(previous_frame->buffer));
+        m_video_buffers_cv.Notify();
+    }
 
     const u64 count = ++m_trace_video_data_success_count;
     if (ShouldTraceCount(count)) {

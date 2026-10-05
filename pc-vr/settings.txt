@@ -115,3 +115,9 @@ resolution=2880
 fps=60
 fov=100
 menu=1
+
+# Opt-in PC OpenXR Move sticks; see README-ANY4QUEST.md for game support limits.
+# move_locomotion=legacy | buttons | directional (default legacy)
+# Buttons: left forward,back,left,right; right turn-left,turn-right (decimal Move bits).
+#move_locomotion=buttons
+#move_locomotion_buttons=4,32,128,64,128,32

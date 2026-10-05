@@ -11,6 +11,7 @@
 #include <mutex>
 
 #include "common/types.h"
+#include "core/vr/vr_move_locomotion.h"
 
 namespace Core::Vr {
 
@@ -71,6 +72,9 @@ struct MoveHostState {
     bool connected{};
     bool linear_velocity_valid{};
     bool angular_velocity_valid{};
+    // PC OpenXR/script input only; the existing standalone wire ABI is unchanged.
+    bool touch_valid{};
+    MoveInput::TouchButtons touch;
     u64 sample_time_ns{}; ///< Shared monotonic capture time; 0 for synchronous in-process hosts.
 };
 
@@ -117,6 +121,8 @@ struct Config {
     bool headset_connected{false};
     /// Explicit opt-in. Default Touch-to-gamepad and physical gamepad paths stay unchanged.
     bool move_enabled{false};
+    MoveInput::LocomotionProfile move_locomotion{MoveInput::LocomotionProfile::Legacy};
+    MoveInput::LocomotionButtons locomotion_buttons{MoveInput::DefaultLocomotionButtons};
     float ipd{0.063f};
     Fov fov{};
     /// The field of view the title is told of is the headset's own (as the host found it), not
@@ -296,6 +302,8 @@ private:
         std::chrono::steady_clock::time_point received;
         bool velocity_known{};
         MoveFeedback feedback;
+        MoveInput::StickLocomotion locomotion;
+        bool locomotion_oriented{};
     };
     std::array<MoveSlot, 2> moves;
     std::atomic<bool> move_enabled{};

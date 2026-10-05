@@ -74,6 +74,11 @@ struct MockRuntime {
         samples = {};
     }
     void UpdateMove(u32 hand, const MoveHostState& value) {
+        if (value.connected) {
+            assert(value.touch_valid);
+            assert(value.touch.stick_x == MoveInput::seen.back().stick_x);
+            assert(value.touch.stick_y == MoveInput::seen.back().stick_y);
+        }
         samples[hand] = value;
         ++update_calls;
     }

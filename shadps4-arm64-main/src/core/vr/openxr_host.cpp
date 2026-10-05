@@ -1123,7 +1123,8 @@ struct OpenXrHost::Impl {
             if (sample.connected) {
                 const bool left = hand == 0;
                 const XrVector2f thumbstick = stick(left ? act_move : act_finger);
-                sample.buttons = MoveInput::MapTouchButtons({
+                sample.touch_valid = true;
+                sample.touch = {
                     .primary = pressed(left ? act_circle : act_cross),
                     .secondary = pressed(left ? act_triangle : act_square),
                     .stick_click = pressed(left ? act_l3 : act_finger_press),
@@ -1132,7 +1133,8 @@ struct OpenXrHost::Impl {
                     .squeeze = pulled(left ? act_l1 : act_r1),
                     .stick_x = thumbstick.x,
                     .stick_y = thumbstick.y,
-                });
+                };
+                sample.buttons = MoveInput::MapTouchButtons(sample.touch);
                 sample.trigger = pulled(left ? act_l2 : act_r2);
 
                 XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};

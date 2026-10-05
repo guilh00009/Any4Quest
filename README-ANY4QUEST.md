@@ -223,3 +223,50 @@ when `--mock-socket` is supplied. Omit it for a real Unix `SOCK_SEQPACKET` integ
 on a Linux environment that permits local sockets (exit 77 means blocked). The cloud
 validation environment denied that socket operation with `EPERM`; only the wrapped-socket
 variant ran there. The Java selection test requires a JDK but not the Android SDK.
+
+
+## Optional Quest thumbstick locomotion (PC OpenXR)
+
+Use `input_mode=move` with `move_locomotion=buttons` or
+`move_locomotion=directional` in the PC launcher settings. Default `legacy`
+retains the previous mappings. This applies to Quest controllers through PC
+OpenXR (including Quest 2/3/3S runtimes exposing the Touch bindings). Physical
+headset verification is still required. The standalone Android host keeps its
+existing mapping; its wire protocol does not yet transmit raw stick axes.
+
+PS Move has no stick axis in its guest interface. These profiles translate sticks
+into the game's own Move controls; they cannot add movement directions or smooth
+analog movement that the game does not implement. Head tracking, physical hand
+positions and the gamepad path are unchanged. No title IDs or game patches select
+these profiles automatically.
+
+* `buttons`: left stick emits the dominant forward/back/left/right button; right
+  stick emits one 150 ms turn press per deflection. This preserves hand orientation.
+  Configure `move_locomotion_buttons=4,32,128,64,128,32` as the six decimal button
+  masks (left forward, back, left, right; right turn-left, turn-right), matching the
+  game's control scheme. Defaults are an example mapping, not universal bindings.
+  Available bits: Move=4, Triangle=16, Circle=32, Cross=64, Square=128; 0 disables
+  a direction. Trigger, Start and Select are rejected for locomotion.
+* `directional`: left stick holds Move with the emulated wand oriented in the
+  requested direction relative to the recentered forward axis. Right stick points
+  the right wand 90 degrees left/right, then pulses Move for 150 ms after a 50 ms
+  lead-in. The game determines the actual turn angle. This is a fallback for
+  wand-direction locomotion: the visible virtual hand rotates while the stick is
+  active. It never moves the hand position or camera and reports no synthetic gyro
+  impulse. Backward, strafe and diagonal behavior depend on the guest game.
+
+Both profiles activate at 0.65 stick deflection and release at 0.35. Release the
+right stick to turn again; holding or reversing it does not repeat turns. Right
+stick vertical motion does nothing; look up/down with the headset. Release both
+sticks once after startup, recenter, tracking loss or disconnect. Physical face,
+menu, click, squeeze and trigger actions take priority on their respective hand;
+release that hand's stick to rearm afterward. Consequently, the directional
+fallback cannot turn with a right-hand trigger held for an interaction. Stick
+down no longer opens Start in these profiles; use the physical left menu button.
+
+Direct executable equivalents: `SHADPS4_MOVE_LOCOMOTION` and
+`SHADPS4_MOVE_LOCOMOTION_BUTTONS`. These settings have no effect in gamepad mode.
+The desktop input script accepts `move0_stick_x`, `move0_stick_y`,
+`move1_stick_x`, `move1_stick_y` for repeatable checks, only with the existing
+headset-disabled script opt-in. Full-game completion and physical Quest tracking
+are separate verification tasks.

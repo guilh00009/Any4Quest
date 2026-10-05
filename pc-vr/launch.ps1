@@ -756,6 +756,7 @@ function Show-Menu($info) {
 function Get-ManagedEnvironmentNames {
     return @("SHADPS4_TITLE_RESOLUTION", "SHADPS4_TITLE_EYE_WIDTH", "SHADPS4_TITLE_TIMESTEP",
         "SHADPS4_VR_FPS_CAP", "SHADPS4_VR_FASTEST_PACE", "SHADPS4_VR_PACE",
+        "SHADPS4_MOVE_LOCOMOTION", "SHADPS4_MOVE_LOCOMOTION_BUTTONS",
         "SHADPS4_VR_INPUT_MODE", "SHADPS4_VR_SHARPEN", "SHADPS4_MAX_MSAA", "SHADPS4_RESOLVE_AA",
         "SHADPS4_XR_HANDS", "SHADPS4_XR_PREDICT_MS", "SHADPS4_STICK_TOUCHPAD",
         "SHADPS4_VIRTUAL_SURROUND", "SHADPS4_VR_FOV", "SHADPS4_VR_FOV_OF", "SHADPS4_OPENXR",
@@ -803,6 +804,12 @@ function Get-LaunchEnvironment($info) {
     }
     # General OpenXR/render/audio settings: no title-specific memory patches are requested here.
     $values["SHADPS4_VR_INPUT_MODE"] = Get-InputMode
+    $locomotion = (Setting "move_locomotion" "legacy").ToLowerInvariant()
+    if ($locomotion -notin @("legacy", "buttons", "directional")) {
+        throw "Invalid move_locomotion; choose legacy, buttons or directional."
+    }
+    $values["SHADPS4_MOVE_LOCOMOTION"] = $locomotion
+    $values["SHADPS4_MOVE_LOCOMOTION_BUTTONS"] = Setting "move_locomotion_buttons" "4,32,128,64,128,32"
     $values["SHADPS4_VR_SHARPEN"] = Setting "sharpen" "0.3"
     if ((Setting "msaa") -ne "") { $values["SHADPS4_MAX_MSAA"] = Setting "msaa" }
     if ((Setting "antialias" "1") -eq "0") { $values["SHADPS4_RESOLVE_AA"] = "0" }

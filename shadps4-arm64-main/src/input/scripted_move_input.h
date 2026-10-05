@@ -25,6 +25,12 @@ bool Parse(const std::string& token, Step& step, ParsePose parse_pose) {
             step.poses[hand]=parse_pose(token.substr(prefix.size()+1));
             return true;
         }
+        if (token.starts_with(prefix+"_stick_x=") || token.starts_with(prefix+"_stick_y=")) {
+            const bool x=token.starts_with(prefix+"_stick_x=");
+            (x ? step.touch[hand].stick_x : step.touch[hand].stick_y)=
+                std::stof(token.substr(prefix.size()+9));
+            return true;
+        }
         if (token.starts_with(prefix+"_grip=")) {
             step.touch[hand].squeeze=std::stof(token.substr(prefix.size()+6));
             return true;

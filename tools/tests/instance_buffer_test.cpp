@@ -271,6 +271,19 @@ int main() {
     InvalidateResourceProofs(f.info);
     Check(!f.info.resource_proofs_valid && !f.info.uniform_selector.count);
   }
+  {
+    ExportResidues facts;
+    Check(facts.Mask(0) == 15 && facts.Mask(32) == 15);
+    facts.Set((1u << 2) | (1u << 17), 3);
+    facts.Set(1u << 5, 1);
+    Check(facts.Mask(2) == 3 && facts.Mask(17) == 3);
+    Check(facts.Mask(5) == 1 && facts.Mask(6) == 15);
+    Check(Inactive(8, facts.Mask(2), 1, facts.proven, 2, true));
+    Check(Inactive(8, facts.Mask(5), 3, facts.proven, 5, true));
+    Check(!Inactive(8, facts.Mask(6), 4, facts.proven, 6, true));
+    facts = {};
+    Check(facts.Mask(5) == 15 && facts.proven == 0);
+  }
   std::cout << "PASS " << checks
             << " checks; real IR adapter and known-bit soundness\n";
 }

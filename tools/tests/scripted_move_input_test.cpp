@@ -35,5 +35,10 @@ int main() {
     assert(Core::Vr::MoveInput::TriggerToByte(s.trigger[1])==128 && s.trigger[0]==0);
     assert(!Parse("move2_grip=1",s,pose) && !Parse("ly=0",s,pose));
     assert(Parse("move1=invalid",s,pose) && !s.poses[1]);
+    Step sticks;
+    assert(Parse("move0_stick_x=-1",sticks,pose));
+    assert(Parse("move1_stick_y=0.75",sticks,pose));
+    assert(sticks.touch[0].stick_x==-1 && sticks.touch[0].stick_y==0);
+    assert(sticks.touch[1].stick_y==.75f && sticks.touch[1].stick_x==0);
     std::cout<<"PASS script Move parsing, independent hands, real grip mapping, headset-disabled gate\n";
 }

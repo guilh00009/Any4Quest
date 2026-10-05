@@ -31,6 +31,118 @@ static void Mode(const char* value) {
     Core::Vr::Runtime::Instance().Configure(false, false);
 }
 
+
+static void LocomotionTests() {
+    using namespace Core::Vr;
+    using namespace Core::Vr::MoveInput;
+    const auto buttons=LocomotionProfile::Buttons, directional=LocomotionProfile::Directional;
+    LocomotionButtons map=DefaultLocomotionButtons;
+    CHECK(ParseLocomotionButtons("4,32,128,64,128,32",map));
+    const auto original=map;
+    for (auto invalid : {"4,32,128,64,128", "4,32,128,64,128,32,4", "4,32,128,64,128,8",
+                         "4,32,128,64,128,256", "4,32,128,64,128,nan", "4,32,128,64,128,-1"}) {
+        CHECK(!ParseLocomotionButtons(invalid,map) && map==original);
+    }
+    CHECK(ParseLocomotion("typo")==LocomotionProfile::Legacy);
+    StickLocomotion state;
+    CHECK(state.Update(buttons,0,{.stick_y=1},0,true,0).buttons==0);
+    state.Update(buttons,0,{},0,true,0);
+    CHECK(state.Update(buttons,0,{.stick_y=.64f},0,true,0).buttons==0);
+    CHECK(state.Update(buttons,0,{.stick_y=.65f},0,true,0).buttons==Move);
+    CHECK(state.Update(buttons,0,{.stick_y=.4f},0,true,0).buttons==Move);
+    CHECK(state.Update(buttons,0,{.stick_y=.35f},0,true,0).buttons==0);
+    const std::array<TouchButtons,4> axes{{{.stick_y=1},{.stick_y=-1},{.stick_x=-1},{.stick_x=1}}};
+    const std::array<float,4> yaw{0,3.14159265f,1.57079633f,-1.57079633f};
+    for (unsigned i=0;i<4;++i) {
+        state.Update(buttons,0,{},0,true,0);
+        auto out=state.Update(buttons,0,axes[i],0,true,0);
+        CHECK(out.buttons==map[i] && !out.orient);
+        state.Update(directional,0,{},0,true,0);
+        out=state.Update(directional,0,axes[i],0,true,0);
+        CHECK(out.buttons==Move && out.orient && Near(std::abs(out.yaw),std::abs(yaw[i])));
+    }
+    for (int sign : {-1,1}) {
+        state.Reset(); state.Update(directional,1,{},0,true,0);
+        TouchButtons stick{.stick_x=float(sign)};
+        CHECK(state.Update(directional,1,stick,0,true,1).buttons==0);
+        auto out=state.Update(directional,1,stick,0,true,1.06);
+        CHECK(out.buttons==Move && Near(out.yaw,-sign*1.57079633f));
+        CHECK(state.Update(directional,1,stick,0,true,1.21).buttons==0);
+        CHECK(state.Update(directional,1,stick,0,true,5).buttons==0);
+        stick.stick_x=-stick.stick_x;
+        CHECK(state.Update(directional,1,stick,0,true,6).buttons==0);
+        state.Update(directional,1,{},0,true,7);
+        CHECK(state.Update(buttons,1,stick,0,true,8).buttons==map[sign>0 ? 4 : 5]);
+        CHECK(state.Update(buttons,1,stick,0,true,8.2).buttons==0);
+    }
+    for (unsigned hand=0;hand<2;++hand) {
+        TouchButtons stick{.stick_x=1,.stick_y=1};
+        state.Reset(); state.Update(directional,hand,{},0,true,0);
+        CHECK(!state.Update(directional,hand,stick,1,true,1).orient);
+        CHECK(!state.Update(directional,hand,stick,0,true,2).orient);
+        state.Update(directional,hand,{},0,true,3);
+        CHECK(state.Update(directional,hand,stick,0,true,4).orient);
+        CHECK(!state.Update(directional,hand,stick,0,false,5).orient);
+        CHECK(!state.Update(directional,hand,stick,0,true,6).orient);
+        state.Update(directional,hand,{},0,true,7);
+        stick.squeeze=1;
+        auto out=state.Update(directional,hand,stick,0,true,8);
+        CHECK(out.buttons==Move && !out.orient);
+        stick.squeeze=0; stick.stick_x=std::numeric_limits<float>::quiet_NaN();
+        CHECK(!state.Update(directional,hand,stick,0,true,9).orient);
+        state.Reset();
+        CHECK(!state.Update(directional,hand,{.stick_x=1},0,true,10).orient);
+    }
+    // Exercise actual runtime transforms, recenter, gyro and original physical controls.
+    auto setProfile=[](const char* v) {
+#ifdef _WIN32
+        _putenv_s("SHADPS4_MOVE_LOCOMOTION",v);
+#else
+        setenv("SHADPS4_MOVE_LOCOMOTION",v,1);
+#endif
+        Mode("move");
+    };
+    auto& runtime=Runtime::Instance();
+    setProfile("directional");
+    DeviceState head{}; head.tracked=true; head.pose.orientation=FromYawPitch(.7f,0);
+    runtime.UpdateHead(head); runtime.RecenterSeat();
+    MoveHostState host{}; host.connected=host.device.tracked=host.touch_valid=true;
+    host.device.pose.position={.25f,-.4f,-.5f};
+    host.device.pose.orientation=FromYawPitch(.3f,.1f);
+    runtime.UpdateMove(0,host);
+    const auto physical=runtime.GetMove(0);
+    const auto headBefore=runtime.GetHead();
+    host.touch.stick_x=1; runtime.UpdateMove(0,host);
+    auto moved=runtime.GetMove(0);
+    CHECK(moved.buttons==Move && Near(moved.device.pose.orientation.y,-std::sqrt(.5f)));
+    CHECK(Near(moved.device.pose.position.x,physical.device.pose.position.x));
+    CHECK(Near(moved.device.pose.position.z,physical.device.pose.position.z));
+    CHECK(Near(moved.gyro.y,0));
+    CHECK(Near(runtime.GetHead().pose.orientation.y,headBefore.pose.orientation.y));
+    host.touch={}; runtime.UpdateMove(0,host);
+    CHECK(runtime.GetMove(0).buttons==0);
+    CHECK(Near(runtime.GetMove(0).device.pose.orientation.y,physical.device.pose.orientation.y));
+    CHECK(Near(runtime.GetMove(0).gyro.y,0));
+    host.touch.stick_y=1; runtime.UpdateMove(0,host);
+    runtime.RecenterSeat(); runtime.UpdateMove(0,host);
+    CHECK(runtime.GetMove(0).buttons==0);
+    host.touch={}; runtime.UpdateMove(0,host);
+    host.touch.stick_y=1; runtime.UpdateMove(0,host);
+    CHECK(runtime.GetMove(0).buttons==Move);
+    host.trigger=1; runtime.UpdateMove(0,host);
+    CHECK(runtime.GetMove(0).buttons==Trigger);
+    CHECK(Near(runtime.GetMove(0).device.pose.orientation.y,physical.device.pose.orientation.y));
+    runtime.ReleaseMoves(); host.trigger=0; runtime.UpdateMove(0,host);
+    CHECK(runtime.GetMove(0).buttons==0);
+    setProfile("buttons"); host.touch={}; runtime.UpdateMove(0,host);
+    host.touch.stick_x=-1; runtime.UpdateMove(0,host);
+    CHECK(runtime.GetMove(0).buttons==Square);
+    CHECK(Near(runtime.GetMove(0).device.pose.orientation.y,physical.device.pose.orientation.y));
+    Mode("gamepad"); runtime.UpdateMove(0,host);
+    CHECK(!runtime.GetMove(0).connected && runtime.GetPad().tracked);
+    setProfile("legacy");
+}
+
 int main() {
     using namespace Core::Vr;
     namespace MI = MoveInput;
@@ -238,5 +350,6 @@ int main() {
     Mode("gamepad");
     CHECK(!runtime.IsMoveEnabled());
     CHECK(runtime.GetPad().tracked); // Legacy fallback remains the legacy gamepad behavior.
+    LocomotionTests();
     std::cout << checks << " runtime/input/protocol checks passed\n";
 }

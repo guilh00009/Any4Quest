@@ -256,6 +256,8 @@ void Replay(std::vector<Step> steps, std::filesystem::path script) {
                 move_touch[hand].secondary |= step.moves.touch[hand].secondary;
                 move_touch[hand].menu |= step.moves.touch[hand].menu;
                 move_touch[hand].stick_click |= step.moves.touch[hand].stick_click;
+                if (step.moves.touch[hand].stick_x != 0) move_touch[hand].stick_x=step.moves.touch[hand].stick_x;
+                if (step.moves.touch[hand].stick_y != 0) move_touch[hand].stick_y=step.moves.touch[hand].stick_y;
                 move_trigger[hand]=std::max(move_trigger[hand],step.moves.trigger[hand]);
             }
             microphone = std::max(microphone, step.microphone);
@@ -311,6 +313,8 @@ void Replay(std::vector<Step> steps, std::filesystem::path script) {
                 Core::Vr::MoveHostState sample{};
                 sample.connected = sample.device.tracked = true;
                 sample.device.pose = *move_steps[hand]->moves.poses[hand];
+                sample.touch_valid = true;
+                sample.touch = move_touch[hand];
                 sample.buttons = Core::Vr::MoveInput::MapTouchButtons(move_touch[hand]);
                 sample.trigger = move_trigger[hand];
                 vr.UpdateMove(hand, sample);

@@ -163,6 +163,18 @@ FileConfig LoadFileConfig() {
             LOG_WARNING(Core_Vr, "Unknown SHADPS4_VR_INPUT_MODE '{}'; using gamepad", input);
         }
     }
+    if (const char* value = std::getenv("SHADPS4_MOVE_LOCOMOTION")) {
+        result.config.move_locomotion = MoveInput::ParseLocomotion(value);
+        if (std::string_view{value} != "legacy" && std::string_view{value} != "buttons" &&
+            std::string_view{value} != "directional" && *value)
+            LOG_WARNING(Core_Vr, "Invalid Move locomotion profile; using legacy");
+    }
+    if (const char* value = std::getenv("SHADPS4_MOVE_LOCOMOTION_BUTTONS"); value && *value) {
+        if (!MoveInput::ParseLocomotionButtons(value, result.config.locomotion_buttons)) {
+            result.config.move_locomotion = MoveInput::LocomotionProfile::Legacy;
+            LOG_WARNING(Core_Vr, "Invalid Move locomotion button map; using legacy");
+        }
+    }
     bool flag = false;
     if (EnvFlag("SHADPS4_VR", flag)) {
         result.mode = flag ? HeadsetMode::On : HeadsetMode::Off;
@@ -280,6 +292,13 @@ void Runtime::PlaceHead() {
 void Runtime::RecenterSeatLocked() {
     if (!host_head.tracked) {
         return;
+    }
+    for (auto& slot : moves) {
+        slot.locomotion.Reset();
+        if (config.move_locomotion != MoveInput::LocomotionProfile::Legacy) {
+            slot.latest.buttons = 0;
+            slot.history_start = slot.history_count = 0;
+        }
     }
     const Quat yaw = YawOnly(host_head.pose.orientation);
     if (seat_valid && pad_attitude_valid) {
@@ -664,6 +683,7 @@ Vec3 Difference(const Vec3& a, const Vec3& b) {
 void Runtime::ExpireMoveLocked(u32 hand, std::chrono::steady_clock::time_point now) {
     auto& slot = moves[hand];
     if (slot.latest.connected && now - slot.received >= std::chrono::milliseconds{250}) {
+        slot.locomotion.Reset();
         slot.latest.connected = false;
         slot.latest.device.tracked = false;
         slot.latest.buttons = slot.latest.trigger = 0;
@@ -676,7 +696,8 @@ void Runtime::ExpireMoveLocked(u32 hand, std::chrono::steady_clock::time_point n
     }
 }
 
-void Runtime::UpdateMove(u32 hand, const MoveHostState& host) {
+void Runtime::UpdateMove(u32 hand, const MoveHostState& raw_host) {
+    MoveHostState host = raw_host;
     if (hand >= moves.size() || !IsMoveEnabled()) return;
     std::scoped_lock lock{mutex};
     const auto now = std::chrono::steady_clock::now();
@@ -689,6 +710,25 @@ void Runtime::UpdateMove(u32 hand, const MoveHostState& host) {
     // data look newly connected or differentiate motion by socket receive jitter.
     if (capture_ns > now_ns || now_ns - capture_ns >= 250000000 ||
         (host.sample_time_ns && slot.source_time_ns && capture_ns <= slot.source_time_ns)) return;
+    if (host.touch_valid && config.move_locomotion != MoveInput::LocomotionProfile::Legacy) {
+        const bool valid = host.connected && host.device.tracked &&
+            Finite(host.device.pose.position) && ValidOrientation(host.device.pose.orientation);
+        const auto mapped = slot.locomotion.Update(config.move_locomotion, hand, host.touch,
+            host.trigger, valid, static_cast<double>(capture_ns) / 1e9, config.locomotion_buttons);
+        host.buttons = mapped.buttons;
+        if (mapped.orient) {
+            host.device.pose.orientation = Multiply(seat_yaw, FromYawPitch(mapped.yaw, 0));
+        }
+        // Synthetic orientation changes are commands, never measured physical gyro motion.
+        if (mapped.orient || slot.locomotion_oriented) {
+            host.device.angular_velocity = {};
+            host.angular_velocity_valid = true;
+        }
+        slot.locomotion_oriented = mapped.orient;
+    } else {
+        slot.locomotion.Reset();
+        slot.locomotion_oriented = false;
+    }
     const u64 age_us = (now_ns - capture_ns) / 1000;
     const u64 process_now = Libraries::Kernel::sceKernelGetProcessTime();
     const u64 capture_us = process_now > age_us ? process_now - age_us : 1;
@@ -775,11 +815,11 @@ void Runtime::UpdateMove(u32 hand, const MoveHostState& host) {
         Diagnostics::Record r{};
         r.kind = 2; r.hand = hand;
         r.flags = sample.connected | (sample.device.tracked << 1) |
-                  (host.linear_velocity_valid << 2) | (host.angular_velocity_valid << 3);
+                  (raw_host.linear_velocity_valid << 2) | (raw_host.angular_velocity_valid << 3);
         r.generation = guest.diagnostic_reference_generation;
         r.receipt_us = process_now; r.returned_us = sample.timestamp_us;
         r.sequence = sample.device.sequence; r.host_sequence = Diagnostics::host_sequence;
-        Diagnostics::PutPose(r, 0, host.device.pose);
+        Diagnostics::PutPose(r, 0, raw_host.device.pose);
         Diagnostics::PutPose(r, 7, host_head.pose);
         Diagnostics::PutPose(r, 14, guest.device.pose);
         Diagnostics::PutVector(r, 21, guest.device.linear_velocity);
@@ -812,12 +852,12 @@ void Runtime::UpdateMove(u32 hand, const MoveHostState& host) {
                 "guest=({:.3f},{:.3f},{:.3f}) velocity=({:.3f},{:.3f},{:.3f}) "
                 "grip_q=({:.3f},{:.3f},{:.3f},{:.3f}) guest_q=({:.3f},{:.3f},{:.3f},{:.3f}) buttons={:#x} trigger={}",
                 hand, sample.connected, tracked, tracked_samples[hand], samples[hand], age_us,
-                host.device.pose.position.x, host.device.pose.position.y, host.device.pose.position.z,
+                raw_host.device.pose.position.x, raw_host.device.pose.position.y, raw_host.device.pose.position.z,
                 host_head.pose.position.x, host_head.pose.position.y, host_head.pose.position.z,
                 guest.device.pose.position.x, guest.device.pose.position.y, guest.device.pose.position.z,
                 guest.device.linear_velocity.x, guest.device.linear_velocity.y, guest.device.linear_velocity.z,
-                host.device.pose.orientation.x, host.device.pose.orientation.y,
-                host.device.pose.orientation.z, host.device.pose.orientation.w,
+                raw_host.device.pose.orientation.x, raw_host.device.pose.orientation.y,
+                raw_host.device.pose.orientation.z, raw_host.device.pose.orientation.w,
                 guest.device.pose.orientation.x, guest.device.pose.orientation.y,
                 guest.device.pose.orientation.z, guest.device.pose.orientation.w, sample.buttons, sample.trigger);
             reported[hand] = now;

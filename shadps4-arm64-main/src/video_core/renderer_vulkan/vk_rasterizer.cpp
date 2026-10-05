@@ -581,9 +581,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline,
     image_infos.clear();
 
     conditional_selector_snapshot = nullptr;
-    conditional_material = 4;
-    conditional_instance_mask = 0xf;
-    conditional_instance_exports = 0;
+    conditional_selectors = {};
     if (!pipeline->IsCompute()) {
         const auto* vs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Vertex)];
         const auto* fs = pipeline->GetStages()[static_cast<u32>(Shader::LogicalStage::Fragment)];
@@ -594,8 +592,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline,
             stages[static_cast<u32>(Shader::LogicalStage::TessellationEval)] != nullptr);
         if (direct_instances && vs && fs && vs->resource_proofs_valid &&
             fs->resource_proofs_valid && direct_routing) {
-            conditional_instance_mask = Shader::Liveness::InstanceMask(*direct_instances);
-            conditional_instance_exports = vs->instance_export_mask;
+            conditional_selectors.Set(vs->instance_export_mask,
+                                      Shader::Liveness::InstanceMask(*direct_instances));
         }
         if (vs && fs && vs->resource_proofs_valid && fs->resource_proofs_valid && direct_routing &&
             vs->uniform_selector.count && vs->uniform_selector.attribute < 32 &&
@@ -613,8 +611,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline,
                 auto snapshot = IsolateReadConstGuestBuffer(sharp.base_address, size);
                 const auto bytes = std::span{reinterpret_cast<const std::byte*>(
                     snapshot->mapped_data.data()), static_cast<size_t>(size)};
-                conditional_instance_mask = proof.Mask(bytes);
-                conditional_instance_exports = 1u << proof.attribute;
+                conditional_selectors.Set(1u << proof.attribute, proof.Mask(bytes));
                 conditional_selector_snapshot = snapshot.get();
                 isolated_readconst_buffers.push_back(std::move(snapshot));
             }
@@ -829,8 +826,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
             !desc.IsSpecial() && !desc.is_written) {
             const auto& input = liverpool->regs.ps_inputs[desc.instance_input];
             instance_inactive = Shader::Liveness::Inactive(desc.instance_mask,
-                conditional_instance_mask, desc.instance_input, conditional_instance_exports,
-                input.input_offset, input.flat_shade);
+                conditional_selectors.Mask(input.input_offset), desc.instance_input,
+                conditional_selectors.proven, input.input_offset, input.flat_shade);
         }
         const bool inactive = instance_inactive;
         const auto vsharp = desc.is_used && !inactive ? desc.GetSharp(stage) : AmdGpu::Buffer::Null();
